@@ -4,11 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**Sprints 0 and 1 are complete** (2026-06-13), all stdlib Python, 36 tests green.
+**Sprints 0–2 are complete** (2026-06-13), all stdlib Python, 40 tests green.
 - **Sprint 0** — canonicalize/localize core + `doctor`. Idempotency invariant proven against real transcripts (242 / 105,623 / 42,714 records — all round-trip losslessly). See `docs/sprint-0-findings.md` for what the dogfooding overturned.
-- **Sprint 1** — single-machine roundtrip: `init`/`push`/`pull`/`status` against a local cluster dir, real `roster.json`, roster of one. Proven byte-identical roundtrip on this project's own context via the CLI.
+- **Sprint 1** — single-machine roundtrip: `init`/`push`/`pull`/`status` against a local cluster dir, real `roster.json`, roster of one. Byte-identical roundtrip proven on this project's own context.
+- **Sprint 2** — second machine: `join`, multi-participant roster, localize-on-checkout. Headline loop verified — context authored on machine B reaches machine A localized to A's paths, with the cluster staying machine-neutral.
 
-`docs/context-convergence-design.md` remains the product source of truth. **Next: Sprint 2** (second machine — `join`, multi-participant roster, localize-on-checkout). After that, Sprint 3 swaps the local cluster dir for a private git remote.
+`docs/context-convergence-design.md` remains the product source of truth. **Next: Sprint 3** — swap the local cluster dir for a private git remote (real `git pull`/`push`, append-mostly union merge, conflict surfacing). The cluster's on-disk shape already matches what git will track, so this is transport, not a re-layout.
 
 **Language: Python** (stdlib only). The *ship*-language is still open (Rust is a candidate); the spike code is not automatically the product. Keep the property tests as the portable spec.
 

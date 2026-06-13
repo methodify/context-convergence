@@ -140,6 +140,60 @@ def init(project_root: str | None, cluster_root: str, project_id: str | None = N
 
 
 # --------------------------------------------------------------------------- #
+# join  (the second machine — design §4.2)
+# --------------------------------------------------------------------------- #
+def join(project_root: str | None, cluster_root: str, project_id: str | None = None) -> dict:
+    """Bring an existing cluster project onto THIS machine, localized.
+
+    The mirror of init: init creates the project from local context; join
+    creates local context from the project. Appends this machine to the roster
+    and materializes the canonical context into this machine's encoded dir.
+    """
+    root = _abs_root(project_root)
+    from .pathmap import encode_project_dir
+    encoded = encode_project_dir(root)
+
+    cluster = Cluster(cluster_root)
+    pid = project_id or os.path.basename(root)
+    if not cluster.has_project(pid):
+        raise ConvergenceError(
+            f"no project '{pid}' in cluster {cluster.root} — run `init` on the "
+            f"first machine, or pass --project-id")
+
+    roster = cluster.load_roster(pid)
+    mid = env.machine_id()
+    now = env.now_iso()
+    participant = Participant(
+        machine_id=mid, os=env.detected_os(), home=env.home_dir(),
+        project_root=root, last_converged=now,
+    )
+    roster.upsert(participant)  # re-join on the same machine replaces its entry
+
+    # Materialize: localize cluster context into this machine's local dir,
+    # backing up anything already there first (design §6).
+    backup = _backup_local_context(encoded)
+    local_dir = _local_context_dir(encoded)
+    os.makedirs(local_dir, exist_ok=True)
+    n_files = n_subs = 0
+    for cf in cluster.context_files(pid):
+        text, n = participant.localize(_read(cf), roster.canonical_sentinel)
+        with open(os.path.join(local_dir, os.path.basename(cf)), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        n_files += 1
+        n_subs += n
+
+    cluster.save_roster(roster)
+    LocalState(
+        project_id=pid, machine_id=mid, cluster_root=cluster.root,
+        project_root=root, encoded_dir=encoded, last_converged=now,
+    ).save()
+
+    return {"project_id": pid, "machine_id": mid, "files": n_files,
+            "substitutions": n_subs, "participants": len(roster.participants),
+            "backup": backup, "local_dir": local_dir}
+
+
+# --------------------------------------------------------------------------- #
 # push
 # --------------------------------------------------------------------------- #
 def push(project_root: str | None = None, project_id: str | None = None) -> dict:

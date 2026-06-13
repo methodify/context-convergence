@@ -32,6 +32,16 @@ def _cmd_init(args) -> int:
     return 0
 
 
+def _cmd_join(args) -> int:
+    r = engine.join(args.project_root, cluster_root=args.cluster, project_id=args.project_id)
+    print(f"join '{r['project_id']}' (machine {r['machine_id']}): "
+          f"{r['files']} file(s), {r['substitutions']} path(s) localized -> {r['local_dir']}")
+    print(f"  roster now has {r['participants']} participant(s)")
+    if r["backup"]:
+        print(f"  backup: {r['backup']}")
+    return 0
+
+
 def _cmd_push(args) -> int:
     r = engine.push(args.project_root, project_id=args.project_id)
     print(f"push '{r['project_id']}': {r['files']} file(s), "
@@ -120,6 +130,12 @@ def main(argv=None) -> int:
     i.add_argument("--cluster", required=True)
     i.add_argument("--project-id", default=None)
     i.set_defaults(func=_cmd_init)
+
+    j = sub.add_parser("join", help="pull a project's context onto a new machine, localized")
+    j.add_argument("project_root", nargs="?", default=None)
+    j.add_argument("--cluster", required=True)
+    j.add_argument("--project-id", default=None)
+    j.set_defaults(func=_cmd_join)
 
     for name, fn, help_ in (
         ("push", _cmd_push, "localize->canonicalize local context into the cluster"),

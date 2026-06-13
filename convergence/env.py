@@ -10,6 +10,7 @@ Overrides:
   CLAUDE_PROJECTS_DIR   where local context lives (default ~/.claude/projects)
   CONVERGENCE_HOME      per-machine convergence state    (default ~/.convergence)
   CONVERGENCE_MACHINE_ID  pin this machine's id (default: generated + persisted)
+  CONVERGENCE_OS        pin the reported OS          (default: detected)
   CONVERGENCE_NOW       pin the clock to a fixed ISO-8601 instant (tests)
 """
 
@@ -67,6 +68,9 @@ def machine_id() -> str:
 
 
 def detected_os() -> str:
+    pinned = os.environ.get("CONVERGENCE_OS")
+    if pinned:
+        return pinned
     import sys
     return {"darwin": "darwin", "linux": "linux", "win32": "windows"}.get(
         sys.platform, sys.platform
