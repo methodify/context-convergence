@@ -34,7 +34,6 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
 
 DEFAULT_SENTINEL = "{{CC_PROJECT_ROOT}}"
 
@@ -196,28 +195,8 @@ def localize_jsonl(
 
 
 # --------------------------------------------------------------------------- #
-# Participant + root inference
+# Root inference
 # --------------------------------------------------------------------------- #
-@dataclass(frozen=True)
-class Participant:
-    """One machine's roster entry — the unit of path rewriting."""
-
-    machine_id: str
-    os: str
-    home: str
-    project_root: str
-
-    @property
-    def encoded_dir(self) -> str:
-        return encode_project_dir(self.project_root)
-
-    def canonicalize(self, text: str, sentinel: str = DEFAULT_SENTINEL) -> tuple[str, int]:
-        return canonicalize_jsonl(text, self.project_root, sentinel)
-
-    def localize(self, text: str, sentinel: str = DEFAULT_SENTINEL) -> tuple[str, int]:
-        return localize_jsonl(text, self.project_root, sentinel)
-
-
 def _ancestors(path: str) -> list[str]:
     path = path.rstrip("/")
     out = []

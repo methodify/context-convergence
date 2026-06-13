@@ -21,7 +21,6 @@ import unittest
 
 from convergence.pathmap import (
     DEFAULT_SENTINEL,
-    Participant,
     canonicalize_jsonl,
     canonicalize_value,
     encode_project_dir,
@@ -29,6 +28,7 @@ from convergence.pathmap import (
     localize_jsonl,
     localize_value,
 )
+from convergence.roster import Participant
 
 # Known (real_root -> encoded_dir) pairs captured from this machine on 2026-06-13.
 ENCODING_PAIRS = [

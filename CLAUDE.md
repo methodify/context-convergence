@@ -4,21 +4,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**Sprint 0 is complete** (2026-06-13). The canonicalize/localize core + `doctor` exist in `convergence/`, with property tests in `tests/`, all stdlib Python. The idempotency invariant is proven against real transcripts (242 / 105,623 / 42,714 records across three corpora — all round-trip losslessly). Read `docs/sprint-0-findings.md` for what the dogfooding overturned; `docs/context-convergence-design.md` remains the product source of truth. **Next: Sprint 1** (single-machine roundtrip — `init`/`push`/`pull`, roster of one, local cluster dir).
+**Sprints 0 and 1 are complete** (2026-06-13), all stdlib Python, 36 tests green.
+- **Sprint 0** — canonicalize/localize core + `doctor`. Idempotency invariant proven against real transcripts (242 / 105,623 / 42,714 records — all round-trip losslessly). See `docs/sprint-0-findings.md` for what the dogfooding overturned.
+- **Sprint 1** — single-machine roundtrip: `init`/`push`/`pull`/`status` against a local cluster dir, real `roster.json`, roster of one. Proven byte-identical roundtrip on this project's own context via the CLI.
 
-**Language: Python** (Sprint 0, stdlib only). The *ship*-language is still open (Rust is a candidate); the spike code is not automatically the product. Keep the property tests as the portable spec.
+`docs/context-convergence-design.md` remains the product source of truth. **Next: Sprint 2** (second machine — `join`, multi-participant roster, localize-on-checkout). After that, Sprint 3 swaps the local cluster dir for a private git remote.
+
+**Language: Python** (stdlib only). The *ship*-language is still open (Rust is a candidate); the spike code is not automatically the product. Keep the property tests as the portable spec.
 
 ### Commands
 
 ```sh
 python3 -m unittest discover -s tests              # run the suite (no deps)
 python3 -m unittest discover -s tests -v           # verbose
+python3 -m unittest tests.test_engine              # one module
+
+# sync verbs (Sprint 1 — local cluster dir)
+python3 -m convergence init <project_root> --cluster <dir> [--project-id ID]
+python3 -m convergence push|pull|status [project_root] [--project-id ID]
+
+# low-level path mapping (Sprint 0)
 python3 -m convergence doctor <context_dir>        # scan + safety report (infers root)
 python3 -m convergence canonicalize <ctx_dir> <out_dir> [--root R]
 python3 -m convergence localize <in_dir> <ctx_dir> --root R   # R = target machine's root
 ```
 
-Real context dirs live at `~/.claude/projects/<encoded-dir>/`. `doctor` on this project's own dir is the fastest smoke test.
+Real context dirs live at `~/.claude/projects/<encoded-dir>/`. `doctor` on this project's own dir is the fastest smoke test. **When testing the sync verbs, always set `CLAUDE_PROJECTS_DIR`, `CONVERGENCE_HOME` (and `CONVERGENCE_MACHINE_ID`/`CONVERGENCE_NOW`) to temp dirs** — `pull` writes into `~/.claude/projects/`, which holds irreplaceable real context. All four env overrides live in `convergence/env.py`.
+
+### Module map
+
+`pathmap.py` (path-mapping core, no I/O) · `roster.py` (`Participant`/`Roster` + persistence) · `cluster.py` (`Cluster` filesystem layout, §3.4) · `localstate.py` (per-machine project marker, §3.5) · `env.py` (location/clock/machine-id resolution, all env-overridable) · `engine.py` (the `init`/`push`/`pull`/`status` verbs; fail-loud round-trip guard on push, backup-before-overwrite on pull) · `doctor.py` (honesty scan) · `__main__.py` (CLI).
 
 ## What this tool is
 

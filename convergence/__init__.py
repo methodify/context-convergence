@@ -10,7 +10,6 @@ sync machinery. Stdlib only. See docs/context-convergence-design.md.
 
 from .pathmap import (
     DEFAULT_SENTINEL,
-    Participant,
     canonicalize_jsonl,
     canonicalize_value,
     encode_project_dir,
@@ -18,10 +17,12 @@ from .pathmap import (
     localize_jsonl,
     localize_value,
 )
+from .roster import Participant, Roster
 
 __all__ = [
     "DEFAULT_SENTINEL",
     "Participant",
+    "Roster",
     "canonicalize_jsonl",
     "canonicalize_value",
     "encode_project_dir",

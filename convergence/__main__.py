@@ -1,11 +1,15 @@
-"""Minimal CLI for the Sprint 0 spike: doctor / canonicalize / localize.
+"""convergence CLI.
 
+Sync verbs (Sprint 1 — local cluster dir, single machine):
+    python -m convergence init <project_root> --cluster <dir> [--project-id ID]
+    python -m convergence push   [project_root] [--project-id ID]
+    python -m convergence pull   [project_root] [--project-id ID]
+    python -m convergence status [project_root] [--project-id ID]
+
+Low-level path-mapping (Sprint 0 — operate on a context dir directly):
     python -m convergence doctor <context_dir> [--root R] [--home H]
     python -m convergence canonicalize <context_dir> <out_dir> [--root R]
     python -m convergence localize <in_dir> <context_dir> --root R
-
-No sync, no roster persistence, no git — just the path-mapping core exercised
-against a real (or copied) context directory.
 """
 
 from __future__ import annotations
@@ -15,8 +19,48 @@ import glob
 import os
 import sys
 
+from . import engine
 from .doctor import format_report, scan
 from .pathmap import DEFAULT_SENTINEL, canonicalize_jsonl, localize_jsonl
+
+
+def _cmd_init(args) -> int:
+    r = engine.init(args.project_root, cluster_root=args.cluster, project_id=args.project_id)
+    print(f"init '{r['project_id']}' (machine {r['machine_id']}): "
+          f"{r['files']} file(s), {r['substitutions']} path(s) canonicalized")
+    print(f"  cluster: {r['cluster']}")
+    return 0
+
+
+def _cmd_push(args) -> int:
+    r = engine.push(args.project_root, project_id=args.project_id)
+    print(f"push '{r['project_id']}': {r['files']} file(s), "
+          f"{r['substitutions']} path(s) canonicalized -> {r['cluster']}")
+    return 0
+
+
+def _cmd_pull(args) -> int:
+    r = engine.pull(args.project_root, project_id=args.project_id)
+    print(f"pull '{r['project_id']}': {r['files']} file(s), "
+          f"{r['substitutions']} path(s) localized -> {r['local_dir']}")
+    if r["backup"]:
+        print(f"  backup: {r['backup']}")
+    return 0
+
+
+def _cmd_status(args) -> int:
+    r = engine.status(args.project_root, project_id=args.project_id)
+    print(f"project '{r['project_id']}'  (machine {r['machine_id']})")
+    print(f"  root:    {r['project_root']}")
+    print(f"  cluster: {r['cluster']}")
+    print(f"  last converged: {r['last_converged']}")
+    print(f"  local files: {r['local_count']}   cluster files: {r['cluster_count']}")
+    print(f"  dirty (push needed):  {', '.join(r['dirty']) or 'none'}")
+    print(f"  behind (pull avail.): {', '.join(r['behind']) or 'none'}")
+    print(f"  roster ({len(r['participants'])} participant(s)):")
+    for mid, osn, root, lc in r["participants"]:
+        print(f"    - {mid}  {osn}  {root}  (converged {lc})")
+    return 0
 
 
 def _cmd_doctor(args) -> int:
@@ -71,6 +115,22 @@ def main(argv=None) -> int:
     p.add_argument("--sentinel", default=DEFAULT_SENTINEL)
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    i = sub.add_parser("init", help="register a project in the cluster (first machine)")
+    i.add_argument("project_root", nargs="?", default=None)
+    i.add_argument("--cluster", required=True)
+    i.add_argument("--project-id", default=None)
+    i.set_defaults(func=_cmd_init)
+
+    for name, fn, help_ in (
+        ("push", _cmd_push, "localize->canonicalize local context into the cluster"),
+        ("pull", _cmd_pull, "localize cluster context into ~/.claude/projects"),
+        ("status", _cmd_status, "show dirty/behind state and roster"),
+    ):
+        sp = sub.add_parser(name, help=help_)
+        sp.add_argument("project_root", nargs="?", default=None)
+        sp.add_argument("--project-id", default=None)
+        sp.set_defaults(func=fn)
+
     d = sub.add_parser("doctor", help="scan a context dir and report safety")
     d.add_argument("context_dir")
     d.add_argument("--root", default=None)
@@ -90,7 +150,11 @@ def main(argv=None) -> int:
     l.set_defaults(func=_cmd_localize)
 
     args = p.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except engine.ConvergenceError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
