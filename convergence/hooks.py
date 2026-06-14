@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import sys
 import traceback
 
@@ -56,8 +57,15 @@ def _log(message: str) -> None:
 # install / uninstall / status
 # --------------------------------------------------------------------------- #
 def hook_command() -> str:
-    """A shell command that invokes hook-sync without requiring a pip install:
-    set PYTHONPATH to the package's parent so `-m convergence` resolves."""
+    """A shell command that invokes hook-sync.
+
+    Prefer the installed `convergence` console script (after `pip install`); fall
+    back to `PYTHONPATH=<repo> python -m convergence` so the hook also works from
+    a bare checkout that was never installed. The MARKER substring is present in
+    both forms so install/uninstall recognise our entry either way."""
+    installed = shutil.which("convergence")
+    if installed:
+        return f"{shlex.quote(installed)} hook-sync"
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return (f"PYTHONPATH={shlex.quote(repo_root)} "
             f"{shlex.quote(sys.executable)} -m convergence hook-sync")
