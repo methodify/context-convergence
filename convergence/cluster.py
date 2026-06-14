@@ -80,6 +80,14 @@ class Cluster:
     def context_files(self, project_id: str) -> list[str]:
         return sorted(glob.glob(os.path.join(self.context_dir(project_id), "*.jsonl")))
 
+    def read_context(self, project_id: str, filename: str) -> str | None:
+        path = os.path.join(self.context_dir(project_id), filename)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except FileNotFoundError:
+            return None
+
     def write_context(self, project_id: str, filename: str, text: str) -> None:
         cdir = self.context_dir(project_id)
         os.makedirs(cdir, exist_ok=True)

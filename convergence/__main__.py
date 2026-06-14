@@ -25,15 +25,25 @@ from .pathmap import DEFAULT_SENTINEL, canonicalize_jsonl, localize_jsonl
 
 
 def _cmd_init(args) -> int:
-    r = engine.init(args.project_root, cluster_root=args.cluster, project_id=args.project_id)
+    r = engine.init(args.project_root, cluster_root=args.cluster,
+                    project_id=args.project_id, remote=args.remote)
     print(f"init '{r['project_id']}' (machine {r['machine_id']}): "
           f"{r['files']} file(s), {r['substitutions']} path(s) canonicalized")
-    print(f"  cluster: {r['cluster']}")
+    print(f"  cluster: {r['cluster']}" + (f"  (remote {r['remote']})" if r["remote"] else ""))
+    return 0
+
+
+def _cmd_sync(args) -> int:
+    r = engine.sync(args.project_root, project_id=args.project_id)
+    print(f"sync '{r['project_id']}': pulled {r['pulled']}, pushed {r['pushed']} file(s)")
+    if r["backup"]:
+        print(f"  backup: {r['backup']}")
     return 0
 
 
 def _cmd_join(args) -> int:
-    r = engine.join(args.project_root, cluster_root=args.cluster, project_id=args.project_id)
+    r = engine.join(args.project_root, cluster_root=args.cluster,
+                    project_id=args.project_id, remote=args.remote)
     print(f"join '{r['project_id']}' (machine {r['machine_id']}): "
           f"{r['files']} file(s), {r['substitutions']} path(s) localized -> {r['local_dir']}")
     print(f"  roster now has {r['participants']} participant(s)")
@@ -128,18 +138,21 @@ def main(argv=None) -> int:
     i = sub.add_parser("init", help="register a project in the cluster (first machine)")
     i.add_argument("project_root", nargs="?", default=None)
     i.add_argument("--cluster", required=True)
+    i.add_argument("--remote", default=None, help="git remote URL/path (omit for a local cluster dir)")
     i.add_argument("--project-id", default=None)
     i.set_defaults(func=_cmd_init)
 
     j = sub.add_parser("join", help="pull a project's context onto a new machine, localized")
     j.add_argument("project_root", nargs="?", default=None)
     j.add_argument("--cluster", required=True)
+    j.add_argument("--remote", default=None, help="git remote URL/path (omit for a local cluster dir)")
     j.add_argument("--project-id", default=None)
     j.set_defaults(func=_cmd_join)
 
     for name, fn, help_ in (
         ("push", _cmd_push, "localize->canonicalize local context into the cluster"),
         ("pull", _cmd_pull, "localize cluster context into ~/.claude/projects"),
+        ("sync", _cmd_sync, "pull then push (the everyday verb)"),
         ("status", _cmd_status, "show dirty/behind state and roster"),
     ):
         sp = sub.add_parser(name, help=help_)

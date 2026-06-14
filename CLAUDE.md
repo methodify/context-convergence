@@ -4,12 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**Sprints 0–2 are complete** (2026-06-13), all stdlib Python, 40 tests green.
+**Sprints 0–3 are complete** (2026-06-13), all stdlib Python, 44 tests green.
 - **Sprint 0** — canonicalize/localize core + `doctor`. Idempotency invariant proven against real transcripts (242 / 105,623 / 42,714 records — all round-trip losslessly). See `docs/sprint-0-findings.md` for what the dogfooding overturned.
 - **Sprint 1** — single-machine roundtrip: `init`/`push`/`pull`/`status` against a local cluster dir, real `roster.json`, roster of one. Byte-identical roundtrip proven on this project's own context.
-- **Sprint 2** — second machine: `join`, multi-participant roster, localize-on-checkout. Headline loop verified — context authored on machine B reaches machine A localized to A's paths, with the cluster staying machine-neutral.
+- **Sprint 2** — second machine: `join`, multi-participant roster, localize-on-checkout. Headline loop verified — context authored on machine B reaches machine A localized to A's paths, cluster staying machine-neutral.
+- **Sprint 3** — git transport: `--remote` makes the cluster a working clone of a private git repo; `sync` = pull then push. Verified over a hermetic bare repo: init→join→sync loop, disjoint-session union across machines, accumulating git history.
 
-`docs/context-convergence-design.md` remains the product source of truth. **Next: Sprint 3** — swap the local cluster dir for a private git remote (real `git pull`/`push`, append-mostly union merge, conflict surfacing). The cluster's on-disk shape already matches what git will track, so this is transport, not a re-layout.
+`docs/context-convergence-design.md` remains the product source of truth. **Next: Sprint 4** — seamless layer (Stop-hook `sync`, `status` polish, secret-scan flag) and hardening.
+
+### Transport model (Sprint 3)
+
+git is **pure transport + history**; all merging happens in canonical space via `transport.union_jsonl`, so the local clone is a cache of the remote and git-level conflicts never arise. Each publishing op (`init`/`join`/`push`) runs `sync_down` (fetch + `reset --hard origin/main`) → re-derives canonical state from local truth, unioned with the remote's latest → commit → push, retrying the whole thing if the push is non-fast-forward. The everyday merge is append-mostly union: disjoint sessions union; a session extended on two machines keeps both sides' records rather than dropping either. Without `--remote`, `open_transport` returns a no-op `LocalTransport` and the cluster dir is the cluster (Sprint 1/2).
 
 **Language: Python** (stdlib only). The *ship*-language is still open (Rust is a candidate); the spike code is not automatically the product. Keep the property tests as the portable spec.
 
@@ -20,9 +25,11 @@ python3 -m unittest discover -s tests              # run the suite (no deps)
 python3 -m unittest discover -s tests -v           # verbose
 python3 -m unittest tests.test_engine              # one module
 
-# sync verbs (Sprint 1 — local cluster dir)
-python3 -m convergence init <project_root> --cluster <dir> [--project-id ID]
-python3 -m convergence push|pull|status [project_root] [--project-id ID]
+# sync verbs — omit --remote for a local cluster dir (Sprint 1/2);
+# pass --remote <git-url> for a private git cluster (Sprint 3)
+python3 -m convergence init <project_root> --cluster <clone_dir> [--remote URL] [--project-id ID]
+python3 -m convergence join <project_root> --cluster <clone_dir> [--remote URL] [--project-id ID]
+python3 -m convergence push|pull|sync|status [project_root] [--project-id ID]
 
 # low-level path mapping (Sprint 0)
 python3 -m convergence doctor <context_dir>        # scan + safety report (infers root)
@@ -34,7 +41,7 @@ Real context dirs live at `~/.claude/projects/<encoded-dir>/`. `doctor` on this 
 
 ### Module map
 
-`pathmap.py` (path-mapping core, no I/O) · `roster.py` (`Participant`/`Roster` + persistence) · `cluster.py` (`Cluster` filesystem layout, §3.4) · `localstate.py` (per-machine project marker, §3.5) · `env.py` (location/clock/machine-id resolution, all env-overridable) · `engine.py` (the `init`/`push`/`pull`/`status` verbs; fail-loud round-trip guard on push, backup-before-overwrite on pull) · `doctor.py` (honesty scan) · `__main__.py` (CLI).
+`pathmap.py` (path-mapping core, no I/O) · `roster.py` (`Participant`/`Roster` + persistence) · `cluster.py` (`Cluster` filesystem layout, §3.4) · `localstate.py` (per-machine project marker, §3.5) · `env.py` (location/clock/machine-id/os resolution, all env-overridable) · `gitutil.py` (thin checked git wrappers) · `transport.py` (`LocalTransport`/`GitTransport` + `union_jsonl`) · `engine.py` (the `init`/`join`/`push`/`pull`/`sync`/`status` verbs; fail-loud round-trip guard on push, backup-before-overwrite on pull, publish-retry) · `doctor.py` (honesty scan) · `__main__.py` (CLI).
 
 ## What this tool is
 

@@ -23,6 +23,7 @@ class LocalState:
     cluster_root: str
     project_root: str
     encoded_dir: str
+    remote: str | None = None
     last_converged: str | None = None
     last_converged_commit: str | None = None
 

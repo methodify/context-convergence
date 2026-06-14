@@ -1,12 +1,14 @@
-"""The verbs: init / push / pull / status (design §4).
+"""The verbs: init / join / push / pull / sync / status (design §4).
 
-Sprint 1 scope — single machine, local cluster directory, roster of one, no git
-and no merge yet (those are Sprint 3). The point is to prove the repo layout and
-canonical form survive a full local roundtrip.
+Transport-agnostic: a local cluster directory (Sprint 1/2) and a private git
+remote (Sprint 3) sit behind the same `Transport` interface. Publishing
+operations (init/join/push) run through a retry loop — if the remote advanced
+under us, `sync_down` rebases our world on the new tip and we re-derive and
+re-publish, so concurrent machines converge without git-level conflicts.
 
 Safety posture (design §6): push runs a per-file round-trip guard and refuses to
 ship anything it cannot losslessly reverse; pull backs up the local context dir
-before overwriting.
+before overwriting; merges union records rather than dropping either side.
 """
 
 from __future__ import annotations
@@ -15,10 +17,13 @@ import glob
 import os
 import shutil
 
-from . import env
-from .cluster import Cluster
+from . import env, gitutil
 from .localstate import LocalState
+from .pathmap import encode_project_dir
 from .roster import Participant, Roster
+from .transport import PushRejected, open_transport, union_jsonl
+
+_PUBLISH_ATTEMPTS = 5
 
 
 class ConvergenceError(Exception):
@@ -46,10 +51,6 @@ def _read(path: str) -> str:
 
 
 def _resolve_state(project_root: str | None, project_id: str | None) -> LocalState:
-    """Find the LocalState for an already-initialised project.
-
-    By explicit --project-id, else by matching a known project's recorded root
-    to the given/working dir. Fails loud if ambiguous or absent."""
     if project_id:
         st = LocalState.load(project_id)
         if not st:
@@ -63,18 +64,16 @@ def _resolve_state(project_root: str | None, project_id: str | None) -> LocalSta
             matches.append(st)
     if not matches:
         raise ConvergenceError(
-            f"no convergence project at {root} — run `init` here first, or pass --project-id")
+            f"no convergence project at {root} — run `init`/`join` here first, or pass --project-id")
     if len(matches) > 1:
-        ids = ", ".join(s.project_id for s in matches)
-        raise ConvergenceError(f"multiple projects at {root}: {ids} — pass --project-id")
+        raise ConvergenceError(
+            f"multiple projects at {root}: {', '.join(s.project_id for s in matches)} — pass --project-id")
     return matches[0]
 
 
 def _guarded_canonicalize(participant: Participant, text: str, sentinel: str) -> str:
-    """Canonicalize, then verify it reverses losslessly. Refuse on failure."""
     canon, _ = participant.canonicalize(text, sentinel)
-    back, _ = participant.localize(canon, sentinel)
-    if back != text:
+    if participant.localize(canon, sentinel)[0] != text:
         raise ConvergenceError(
             "refusing to push: a transcript did not round-trip losslessly "
             "(run `doctor` to inspect). No data was written.")
@@ -82,24 +81,53 @@ def _guarded_canonicalize(participant: Participant, text: str, sentinel: str) ->
 
 
 def _backup_local_context(encoded_dir: str) -> str | None:
-    """Copy the local context dir to a timestamped backup before overwriting."""
-    src = _local_context_dir(encoded_dir)
     files = _local_context_files(encoded_dir)
     if not files:
         return None
-    dst = os.path.join(env.convergence_home(), "backups", encoded_dir, env.now_iso().replace(":", ""))
+    dst = os.path.join(env.convergence_home(), "backups", encoded_dir,
+                       env.now_iso().replace(":", ""))
     os.makedirs(dst, exist_ok=True)
     for f in files:
         shutil.copy2(f, os.path.join(dst, os.path.basename(f)))
     return dst
 
 
+def _publishing(op):
+    """Run a publishing operation, retrying if the remote advanced under us.
+    Each attempt re-syncs and re-derives from local truth, so retries are clean."""
+    last = None
+    for _ in range(_PUBLISH_ATTEMPTS):
+        try:
+            return op()
+        except PushRejected as e:
+            last = e
+    raise ConvergenceError(f"could not publish after {_PUBLISH_ATTEMPTS} attempts "
+                           f"(remote kept advancing): {last}")
+
+
+def _write_canonical(transport, pid, participant, encoded, sentinel, *, union):
+    """Canonicalize this machine's local context into the cluster working tree.
+    On push, union with whatever the remote already holds so no records drop."""
+    n_files = n_subs = 0
+    for f in _local_context_files(encoded):
+        text = _read(f)
+        canon = _guarded_canonicalize(participant, text, sentinel)
+        name = os.path.basename(f)
+        if union:
+            existing = transport.cluster.read_context(pid, name)
+            if existing is not None:
+                canon = union_jsonl(existing, canon)
+        transport.cluster.write_context(pid, name, canon)
+        n_files += 1
+        n_subs += participant.canonicalize(text, sentinel)[1]
+    return n_files, n_subs
+
+
 # --------------------------------------------------------------------------- #
 # init
 # --------------------------------------------------------------------------- #
-def init(project_root: str | None, cluster_root: str, project_id: str | None = None) -> dict:
+def init(project_root, cluster_root, project_id=None, remote=None) -> dict:
     root = _abs_root(project_root)
-    from .pathmap import encode_project_dir
     encoded = encode_project_dir(root)
     if not _local_context_files(encoded):
         raise ConvergenceError(
@@ -107,128 +135,122 @@ def init(project_root: str | None, cluster_root: str, project_id: str | None = N
             f"  expected: {_local_context_dir(encoded)}/*.jsonl")
     pid = project_id or os.path.basename(root)
 
-    cluster = Cluster(cluster_root)
-    cluster.ensure()
-    if cluster.has_project(pid):
-        raise ConvergenceError(
-            f"project '{pid}' already exists in the cluster — use `push`, "
-            f"or `join` on a new machine")
+    transport = open_transport(cluster_root, remote)
+    transport.ensure()
+    mid, now = env.machine_id(), env.now_iso()
 
-    mid = env.machine_id()
-    now = env.now_iso()
-    participant = Participant(
-        machine_id=mid, os=env.detected_os(), home=env.home_dir(),
-        project_root=root, last_converged=now,
-    )
-    roster = Roster(project_id=pid, participants=[participant])
+    def op():
+        transport.sync_down()
+        if transport.cluster.has_project(pid):
+            raise ConvergenceError(
+                f"project '{pid}' already exists in the cluster — use `push`, or `join`")
+        participant = Participant(machine_id=mid, os=env.detected_os(),
+                                  home=env.home_dir(), project_root=root, last_converged=now)
+        roster = Roster(project_id=pid, participants=[participant])
+        n_files, n_subs = _write_canonical(transport, pid, participant,
+                                           encoded, roster.canonical_sentinel, union=False)
+        transport.cluster.save_roster(roster)
+        transport.publish(f"init {pid} from {mid}")
+        return n_files, n_subs
 
-    n_files = n_subs = 0
-    for f in _local_context_files(encoded):
-        canon = _guarded_canonicalize(participant, _read(f), roster.canonical_sentinel)
-        cluster.write_context(pid, os.path.basename(f), canon)
-        n_files += 1
-        n_subs += participant.canonicalize(_read(f), roster.canonical_sentinel)[1]
-    cluster.save_roster(roster)
-
-    LocalState(
-        project_id=pid, machine_id=mid, cluster_root=cluster.root,
-        project_root=root, encoded_dir=encoded, last_converged=now,
-    ).save()
-
+    n_files, n_subs = _publishing(op)
+    commit = gitutil.current_commit(transport.cluster.root)
+    LocalState(project_id=pid, machine_id=mid, cluster_root=transport.cluster.root,
+               project_root=root, encoded_dir=encoded, remote=remote,
+               last_converged=now, last_converged_commit=commit).save()
     return {"project_id": pid, "machine_id": mid, "files": n_files,
-            "substitutions": n_subs, "cluster": cluster.root}
+            "substitutions": n_subs, "cluster": transport.cluster.root, "remote": remote}
 
 
 # --------------------------------------------------------------------------- #
-# join  (the second machine — design §4.2)
+# join
 # --------------------------------------------------------------------------- #
-def join(project_root: str | None, cluster_root: str, project_id: str | None = None) -> dict:
-    """Bring an existing cluster project onto THIS machine, localized.
-
-    The mirror of init: init creates the project from local context; join
-    creates local context from the project. Appends this machine to the roster
-    and materializes the canonical context into this machine's encoded dir.
-    """
+def join(project_root, cluster_root, project_id=None, remote=None) -> dict:
     root = _abs_root(project_root)
-    from .pathmap import encode_project_dir
     encoded = encode_project_dir(root)
-
-    cluster = Cluster(cluster_root)
+    transport = open_transport(cluster_root, remote)
+    transport.ensure()
     pid = project_id or os.path.basename(root)
-    if not cluster.has_project(pid):
-        raise ConvergenceError(
-            f"no project '{pid}' in cluster {cluster.root} — run `init` on the "
-            f"first machine, or pass --project-id")
+    mid, now = env.machine_id(), env.now_iso()
 
-    roster = cluster.load_roster(pid)
-    mid = env.machine_id()
-    now = env.now_iso()
-    participant = Participant(
-        machine_id=mid, os=env.detected_os(), home=env.home_dir(),
-        project_root=root, last_converged=now,
-    )
-    roster.upsert(participant)  # re-join on the same machine replaces its entry
+    result = {}
 
-    # Materialize: localize cluster context into this machine's local dir,
-    # backing up anything already there first (design §6).
+    def op():
+        transport.sync_down()
+        if not transport.cluster.has_project(pid):
+            raise ConvergenceError(
+                f"no project '{pid}' in cluster — run `init` on the first machine, or pass --project-id")
+        roster = transport.cluster.load_roster(pid)
+        participant = Participant(machine_id=mid, os=env.detected_os(),
+                                  home=env.home_dir(), project_root=root, last_converged=now)
+        roster.upsert(participant)
+        transport.cluster.save_roster(roster)
+        transport.publish(f"join {pid} from {mid}")
+        result["participant"] = participant
+        result["sentinel"] = roster.canonical_sentinel
+        result["participants"] = len(roster.participants)
+
+    _publishing(op)
+
+    # Materialize locally (read-only on the cluster; backup existing first).
     backup = _backup_local_context(encoded)
     local_dir = _local_context_dir(encoded)
     os.makedirs(local_dir, exist_ok=True)
     n_files = n_subs = 0
-    for cf in cluster.context_files(pid):
-        text, n = participant.localize(_read(cf), roster.canonical_sentinel)
+    for cf in transport.cluster.context_files(pid):
+        text, n = result["participant"].localize(_read(cf), result["sentinel"])
         with open(os.path.join(local_dir, os.path.basename(cf)), "w", encoding="utf-8") as fh:
             fh.write(text)
         n_files += 1
         n_subs += n
 
-    cluster.save_roster(roster)
-    LocalState(
-        project_id=pid, machine_id=mid, cluster_root=cluster.root,
-        project_root=root, encoded_dir=encoded, last_converged=now,
-    ).save()
-
-    return {"project_id": pid, "machine_id": mid, "files": n_files,
-            "substitutions": n_subs, "participants": len(roster.participants),
-            "backup": backup, "local_dir": local_dir}
+    commit = gitutil.current_commit(transport.cluster.root)
+    LocalState(project_id=pid, machine_id=mid, cluster_root=transport.cluster.root,
+               project_root=root, encoded_dir=encoded, remote=remote,
+               last_converged=now, last_converged_commit=commit).save()
+    return {"project_id": pid, "machine_id": mid, "files": n_files, "substitutions": n_subs,
+            "participants": result["participants"], "backup": backup, "local_dir": local_dir}
 
 
 # --------------------------------------------------------------------------- #
 # push
 # --------------------------------------------------------------------------- #
-def push(project_root: str | None = None, project_id: str | None = None) -> dict:
+def push(project_root=None, project_id=None) -> dict:
     st = _resolve_state(project_root, project_id)
-    cluster = Cluster(st.cluster_root)
-    roster = cluster.load_roster(st.project_id)
-    participant = roster.get(st.machine_id)
-    if not participant:
-        raise ConvergenceError(
-            f"this machine ({st.machine_id}) is not in the roster for '{st.project_id}'")
-
-    n_files = n_subs = 0
-    for f in _local_context_files(st.encoded_dir):
-        text = _read(f)
-        canon = _guarded_canonicalize(participant, text, roster.canonical_sentinel)
-        cluster.write_context(st.project_id, os.path.basename(f), canon)
-        n_files += 1
-        n_subs += participant.canonicalize(text, roster.canonical_sentinel)[1]
-
+    transport = open_transport(st.cluster_root, st.remote)
     now = env.now_iso()
-    participant.last_converged = now
-    cluster.save_roster(roster)
+    out = {}
+
+    def op():
+        transport.sync_down()
+        roster = transport.cluster.load_roster(st.project_id)
+        participant = roster.get(st.machine_id)
+        if not participant:
+            raise ConvergenceError(
+                f"this machine ({st.machine_id}) is not in the roster for '{st.project_id}'")
+        n_files, n_subs = _write_canonical(transport, st.project_id, participant,
+                                           st.encoded_dir, roster.canonical_sentinel, union=True)
+        participant.last_converged = now
+        transport.cluster.save_roster(roster)
+        transport.publish(f"push {st.project_id} from {st.machine_id}")
+        out["files"], out["subs"] = n_files, n_subs
+
+    _publishing(op)
     st.last_converged = now
+    st.last_converged_commit = gitutil.current_commit(transport.cluster.root)
     st.save()
-    return {"project_id": st.project_id, "files": n_files, "substitutions": n_subs,
-            "cluster": cluster.root}
+    return {"project_id": st.project_id, "files": out["files"], "substitutions": out["subs"],
+            "cluster": transport.cluster.root}
 
 
 # --------------------------------------------------------------------------- #
 # pull
 # --------------------------------------------------------------------------- #
-def pull(project_root: str | None = None, project_id: str | None = None) -> dict:
+def pull(project_root=None, project_id=None) -> dict:
     st = _resolve_state(project_root, project_id)
-    cluster = Cluster(st.cluster_root)
-    roster = cluster.load_roster(st.project_id)
+    transport = open_transport(st.cluster_root, st.remote)
+    transport.sync_down()
+    roster = transport.cluster.load_roster(st.project_id)
     participant = roster.get(st.machine_id)
     if not participant:
         raise ConvergenceError(
@@ -237,30 +259,39 @@ def pull(project_root: str | None = None, project_id: str | None = None) -> dict
     backup = _backup_local_context(st.encoded_dir)
     local_dir = _local_context_dir(st.encoded_dir)
     os.makedirs(local_dir, exist_ok=True)
-
     n_files = n_subs = 0
-    for cf in cluster.context_files(st.project_id):
-        local_text, n = participant.localize(_read(cf), roster.canonical_sentinel)
+    for cf in transport.cluster.context_files(st.project_id):
+        text, n = participant.localize(_read(cf), roster.canonical_sentinel)
         with open(os.path.join(local_dir, os.path.basename(cf)), "w", encoding="utf-8") as fh:
-            fh.write(local_text)
+            fh.write(text)
         n_files += 1
         n_subs += n
 
-    now = env.now_iso()
-    participant.last_converged = now
-    cluster.save_roster(roster)
-    st.last_converged = now
+    st.last_converged = env.now_iso()
+    st.last_converged_commit = gitutil.current_commit(transport.cluster.root)
     st.save()
     return {"project_id": st.project_id, "files": n_files, "substitutions": n_subs,
             "backup": backup, "local_dir": local_dir}
 
 
 # --------------------------------------------------------------------------- #
+# sync = pull then push (the everyday verb)
+# --------------------------------------------------------------------------- #
+def sync(project_root=None, project_id=None) -> dict:
+    pl = pull(project_root, project_id)
+    ph = push(project_root, project_id)
+    return {"project_id": ph["project_id"], "pulled": pl["files"],
+            "pushed": ph["files"], "backup": pl["backup"]}
+
+
+# --------------------------------------------------------------------------- #
 # status
 # --------------------------------------------------------------------------- #
-def status(project_root: str | None = None, project_id: str | None = None) -> dict:
+def status(project_root=None, project_id=None) -> dict:
     st = _resolve_state(project_root, project_id)
-    cluster = Cluster(st.cluster_root)
+    transport = open_transport(st.cluster_root, st.remote)
+    transport.sync_down()  # reflect the remote's latest in "behind"
+    cluster = transport.cluster
     roster = cluster.load_roster(st.project_id)
     participant = roster.get(st.machine_id)
     sentinel = roster.canonical_sentinel
@@ -268,26 +299,23 @@ def status(project_root: str | None = None, project_id: str | None = None) -> di
     local_files = {os.path.basename(f): f for f in _local_context_files(st.encoded_dir)}
     cluster_files = {os.path.basename(f): f for f in cluster.context_files(st.project_id)}
 
-    dirty, behind = [], []
+    dirty = []
     for name, lf in local_files.items():
         if name not in cluster_files:
-            dirty.append(name)  # new locally, not yet pushed
-        else:
-            canon = participant.canonicalize(_read(lf), sentinel)[0] if participant else _read(lf)
-            if canon != _read(cluster_files[name]):
+            dirty.append(name)
+        elif participant:
+            canon = participant.canonicalize(_read(lf), sentinel)[0]
+            if union_jsonl(cluster.read_context(st.project_id, name), canon) != \
+                    cluster.read_context(st.project_id, name):
                 dirty.append(name)
     behind = [n for n in cluster_files if n not in local_files]
 
     return {
-        "project_id": st.project_id,
-        "machine_id": st.machine_id,
-        "cluster": st.cluster_root,
-        "project_root": st.project_root,
-        "last_converged": st.last_converged,
+        "project_id": st.project_id, "machine_id": st.machine_id,
+        "cluster": st.cluster_root, "remote": st.remote,
+        "project_root": st.project_root, "last_converged": st.last_converged,
         "participants": [(p.machine_id, p.os, p.project_root, p.last_converged)
                          for p in roster.participants],
-        "local_count": len(local_files),
-        "cluster_count": len(cluster_files),
-        "dirty": sorted(dirty),
-        "behind": sorted(behind),
+        "local_count": len(local_files), "cluster_count": len(cluster_files),
+        "dirty": sorted(dirty), "behind": sorted(behind),
     }
