@@ -1,95 +1,81 @@
-"""The cluster: a directory holding canonical context for one or more projects.
+"""The cluster tree: one project's canonical context, plus its roster.
 
-Layout (design §3.4) — in Sprint 1 this is a plain local directory; Sprint 3
-points it at a private git repo, but the on-disk shape is identical:
+In the branch-per-project model the cluster repo holds one orphan branch per
+project, and a machine clones a single project's branch. So a working clone (or,
+for a local no-git cluster, a plain directory) holds exactly ONE project's tree:
 
-    <cluster>/
-    ├── README.md                  (machine-managed; do not hand-edit)
-    ├── .convergence/config.json   (cluster-level config + schema version)
-    └── projects/<project_id>/
-        ├── roster.json
-        └── context/               (canonical form of the context dir)
-            └── <session>.jsonl
+    <root>/
+    ├── roster.json
+    └── context/                 (canonical form of the context dir)
+        └── <session>.jsonl
+
+(The repo's `main` branch separately holds a README explaining the cluster; that
+is managed by the git transport, not here.)
 """
 
 from __future__ import annotations
 
 import glob
-import json
 import os
 
 from .roster import Roster
 
-SCHEMA_VERSION = 1
-
-_README = """\
+README_MAIN = """\
 # Convergence context cluster
 
-This directory is **managed by `convergence`** — do not hand-edit. It holds the
-*canonical form* (machine-neutral, path-rewritten) of Claude Code project
-context, plus a roster describing how to expand it per machine.
+This repository is **managed by `convergence`** — do not hand-edit.
+
+It stores Claude Code project *context* (session transcripts), one **project per
+branch** (`project/<id>`), in machine-neutral *canonical form* with paths
+replaced by sentinels. Each project branch holds a `roster.json` (how to expand
+the sentinels per machine) and a `context/` directory. Clone a single project
+with `convergence join … --remote <this repo>`; list projects with
+`convergence projects --remote <this repo>`.
 
 Keep this repository **private**: transcripts can contain secrets.
 """
 
 
 class Cluster:
+    """One project's tree, rooted at a working clone (git) or a local dir."""
+
     def __init__(self, root: str):
         self.root = os.path.abspath(root)
 
-    # -- locations -------------------------------------------------------- #
     @property
-    def config_path(self) -> str:
-        return os.path.join(self.root, ".convergence", "config.json")
+    def roster_path(self) -> str:
+        return os.path.join(self.root, "roster.json")
 
-    def project_dir(self, project_id: str) -> str:
-        return os.path.join(self.root, "projects", project_id)
+    @property
+    def context_dir(self) -> str:
+        return os.path.join(self.root, "context")
 
-    def roster_path(self, project_id: str) -> str:
-        return os.path.join(self.project_dir(project_id), "roster.json")
-
-    def context_dir(self, project_id: str) -> str:
-        return os.path.join(self.project_dir(project_id), "context")
-
-    # -- lifecycle -------------------------------------------------------- #
     def ensure(self) -> None:
-        """Create the cluster scaffold if absent (idempotent)."""
-        os.makedirs(os.path.join(self.root, ".convergence"), exist_ok=True)
-        os.makedirs(os.path.join(self.root, "projects"), exist_ok=True)
-        if not os.path.exists(self.config_path):
-            with open(self.config_path, "w", encoding="utf-8") as fh:
-                json.dump({"schema_version": SCHEMA_VERSION}, fh, indent=2)
-                fh.write("\n")
-        readme = os.path.join(self.root, "README.md")
-        if not os.path.exists(readme):
-            with open(readme, "w", encoding="utf-8") as fh:
-                fh.write(_README)
+        os.makedirs(self.context_dir, exist_ok=True)
 
-    def has_project(self, project_id: str) -> bool:
-        return os.path.exists(self.roster_path(project_id))
+    def has_roster(self) -> bool:
+        return os.path.exists(self.roster_path)
 
     # -- roster ----------------------------------------------------------- #
-    def load_roster(self, project_id: str) -> Roster:
-        return Roster.load(self.roster_path(project_id))
+    def load_roster(self) -> Roster:
+        return Roster.load(self.roster_path)
 
     def save_roster(self, roster: Roster) -> None:
-        os.makedirs(self.project_dir(roster.project_id), exist_ok=True)
-        roster.save(self.roster_path(roster.project_id))
+        os.makedirs(self.root, exist_ok=True)
+        roster.save(self.roster_path)
 
     # -- canonical context ------------------------------------------------ #
-    def context_files(self, project_id: str) -> list[str]:
-        return sorted(glob.glob(os.path.join(self.context_dir(project_id), "*.jsonl")))
+    def context_files(self) -> list[str]:
+        return sorted(glob.glob(os.path.join(self.context_dir, "*.jsonl")))
 
-    def read_context(self, project_id: str, filename: str) -> str | None:
-        path = os.path.join(self.context_dir(project_id), filename)
+    def read_context(self, filename: str) -> str | None:
         try:
-            with open(path, encoding="utf-8", errors="replace") as fh:
+            with open(os.path.join(self.context_dir, filename), encoding="utf-8", errors="replace") as fh:
                 return fh.read()
         except FileNotFoundError:
             return None
 
-    def write_context(self, project_id: str, filename: str, text: str) -> None:
-        cdir = self.context_dir(project_id)
-        os.makedirs(cdir, exist_ok=True)
-        with open(os.path.join(cdir, filename), "w", encoding="utf-8") as fh:
+    def write_context(self, filename: str, text: str) -> None:
+        os.makedirs(self.context_dir, exist_ok=True)
+        with open(os.path.join(self.context_dir, filename), "w", encoding="utf-8") as fh:
             fh.write(text)

@@ -72,10 +72,10 @@ class MultiMachineTest(unittest.TestCase):
     def test_join_localizes_onto_second_machine(self):
         self._use("A", "machine-A", os_name="darwin")
         self._seed_local(ROOT_A, _jsonl(_record(ROOT_A), _record(ROOT_A)))
-        engine.init(ROOT_A, cluster_root=self.cluster)
+        engine.init(ROOT_A, cluster=self.cluster)
 
         self._use("B", "machine-B", os_name="linux")
-        r = engine.join(ROOT_B, cluster_root=self.cluster)
+        r = engine.join(ROOT_B, cluster=self.cluster)
         self.assertEqual(r["participants"], 2)
 
         b_text = _slurp(os.path.join(self._ctx_dir(ROOT_B), "sess.jsonl"))
@@ -84,13 +84,13 @@ class MultiMachineTest(unittest.TestCase):
         self.assertNotIn("{{CC_PROJECT_ROOT}}", b_text)
 
         # Cluster stays machine-neutral; A's local form is untouched.
-        canon = _slurp(Cluster(self.cluster).context_files("demo")[0])
+        canon = _slurp(Cluster(self.cluster).context_files()[0])
         self.assertNotIn(ROOT_A, canon)
         self.assertNotIn(ROOT_B, canon)
         self._use("A", "machine-A")
         self.assertIn(ROOT_A, _slurp(os.path.join(self._ctx_dir(ROOT_A), "sess.jsonl")))
 
-        roster = Cluster(self.cluster).load_roster("demo")
+        roster = Cluster(self.cluster).load_roster()
         self.assertEqual({p.machine_id for p in roster.participants}, {"machine-A", "machine-B"})
         self.assertEqual(roster.get("machine-B").project_root, ROOT_B)
         self.assertEqual(roster.get("machine-A").os, "darwin")
@@ -101,10 +101,10 @@ class MultiMachineTest(unittest.TestCase):
         # A pulls and sees B's work with A's local paths. The headline.
         self._use("A", "machine-A")
         self._seed_local(ROOT_A, _jsonl(_record(ROOT_A)))
-        engine.init(ROOT_A, cluster_root=self.cluster)
+        engine.init(ROOT_A, cluster=self.cluster)
 
         self._use("B", "machine-B")
-        engine.join(ROOT_B, cluster_root=self.cluster)
+        engine.join(ROOT_B, cluster=self.cluster)
         with open(os.path.join(self._ctx_dir(ROOT_B), "newsess.jsonl"), "w") as fh:
             fh.write(_jsonl(_record(ROOT_B)))
         engine.push(project_root=ROOT_B)
@@ -120,19 +120,19 @@ class MultiMachineTest(unittest.TestCase):
     def test_join_unknown_project_fails_loud(self):
         self._use("A", "machine-A")
         self._seed_local(ROOT_A, _jsonl(_record(ROOT_A)))
-        engine.init(ROOT_A, cluster_root=self.cluster)
+        engine.init(ROOT_A, cluster=self.cluster)
         self._use("B", "machine-B")
         with self.assertRaises(engine.ConvergenceError):
-            engine.join(ROOT_B, cluster_root=self.cluster, project_id="nope")
+            engine.join(ROOT_B, cluster=self.cluster, project_id="nope")
 
     def test_rejoin_same_machine_does_not_duplicate(self):
         self._use("A", "machine-A")
         self._seed_local(ROOT_A, _jsonl(_record(ROOT_A)))
-        engine.init(ROOT_A, cluster_root=self.cluster)
+        engine.init(ROOT_A, cluster=self.cluster)
         self._use("B", "machine-B")
-        engine.join(ROOT_B, cluster_root=self.cluster)
-        engine.join(ROOT_B, cluster_root=self.cluster)  # re-join
-        roster = Cluster(self.cluster).load_roster("demo")
+        engine.join(ROOT_B, cluster=self.cluster)
+        engine.join(ROOT_B, cluster=self.cluster)  # re-join
+        roster = Cluster(self.cluster).load_roster()
         self.assertEqual(len(roster.participants), 2)
 
 

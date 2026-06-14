@@ -58,7 +58,7 @@ class ScanIntegrationTest(unittest.TestCase):
         rec = {"cwd": ROOT, "secret": "ghp_" + "d" * 36}
         with open(os.path.join(d, "sess.jsonl"), "w") as fh:
             fh.write(json.dumps(rec) + "\n")
-        engine.init(ROOT, cluster_root=self.cluster)
+        engine.init(ROOT, cluster=self.cluster)
 
     def tearDown(self):
         os.environ.clear()

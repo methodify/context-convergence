@@ -14,9 +14,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `docs/context-convergence-design.md` remains the product source of truth. The v1 build order is done. **Remaining** is optional: Sprint 5 (background watcher mode, §5.2) and packaging (a `pyproject.toml` for a clean `convergence` console script — the Stop hook currently runs via `PYTHONPATH`).
 
-### Transport model (Sprint 3)
+### Storage & transport model (branch-per-project)
 
-git is **pure transport + history**; all merging happens in canonical space via `transport.union_jsonl`, so the local clone is a cache of the remote and git-level conflicts never arise. Each publishing op (`init`/`join`/`push`) runs `sync_down` (fetch + `reset --hard origin/main`) → re-derives canonical state from local truth, unioned with the remote's latest → commit → push, retrying the whole thing if the push is non-fast-forward. The everyday merge is append-mostly union: disjoint sessions union; a session extended on two machines keeps both sides' records rather than dropping either. Without `--remote`, `open_transport` returns a no-op `LocalTransport` and the cluster dir is the cluster (Sprint 1/2).
+**One cluster repo, one orphan branch per project** (`project/<id>`). A machine keeps a **single-branch working clone per project** under `~/.convergence/clones/<id>/`, so cloning one project never fetches the others' history and pushing one project never conflicts with another (different branches). The repo's `main` branch holds only a human-readable README. The set of `project/*` branches *is* the project registry — `convergence projects --remote <url>` lists them via `ls-remote`, no clone. A project's tree is flat: `roster.json` + `context/*.jsonl` at the branch root (no `projects/<id>/` nesting — the branch *is* the project).
+
+git is **pure transport + history**; all merging happens in canonical space via `transport.union_jsonl`, so the clone is a cache of the branch and git-level conflicts never arise. Each publishing op (`init`/`join`/`push`) runs `sync_down` (fetch + `reset --hard origin/<branch>`) → re-derives canonical state from local truth, unioned with the branch's latest → commit → push, retrying if non-fast-forward. The everyday merge is append-mostly union: disjoint sessions union; a session extended on two machines keeps both sides. `init` creates the orphan branch (+ seeds `main`'s README on a fresh cluster); `join` does `clone --single-branch`. Without `--remote`, `open_transport` returns a `LocalTransport` and a `--cluster <dir>` holds one project (mainly a test convenience).
 
 **Language: Python, stdlib-only — locked in** (2026-06-13). The ship-language question is closed; Rust was ruled out. Don't add third-party deps (tests use `unittest`). Keep the property tests as the correctness spec.
 
@@ -27,11 +29,13 @@ python3 -m unittest discover -s tests              # run the suite (no deps)
 python3 -m unittest discover -s tests -v           # verbose
 python3 -m unittest tests.test_engine              # one module
 
-# sync verbs — omit --remote for a local cluster dir (Sprint 1/2);
-# pass --remote <git-url> for a private git cluster (Sprint 3)
-python3 -m convergence init <project_root> --cluster <clone_dir> [--remote URL] [--project-id ID]
-python3 -m convergence join <project_root> --cluster <clone_dir> [--remote URL] [--project-id ID]
+# the cluster is one private git repo; each project is a branch project/<id>.
+# clone is managed under ~/.convergence/clones/<id>/ — you just pass --remote.
+python3 -m convergence init <project_root> --remote <git-url> [--project-id ID] [--no-rewrite-home]
+python3 -m convergence join <project_root> --remote <git-url> [--project-id ID]
+python3 -m convergence projects --remote <git-url>            # list projects (branches)
 python3 -m convergence push|pull|sync|status [project_root] [--project-id ID]
+#   (--cluster <dir> instead of --remote = a local no-git cluster, one project per dir)
 python3 -m convergence push <project_root> --scan-secrets [--strict]   # opt-in secret scan
 python3 -m convergence scan [project_root]                             # secret scan, no sync
 python3 -m convergence hook install|uninstall|status [--event Stop|SessionEnd]
@@ -46,7 +50,7 @@ Real context dirs live at `~/.claude/projects/<encoded-dir>/`. `doctor` on this 
 
 ### Module map
 
-`pathmap.py` (path-mapping core, no I/O) · `roster.py` (`Participant`/`Roster` + persistence) · `cluster.py` (`Cluster` filesystem layout, §3.4) · `localstate.py` (per-machine project marker, §3.5) · `env.py` (location/clock/machine-id/os/settings resolution, all env-overridable) · `gitutil.py` (thin checked git wrappers) · `transport.py` (`LocalTransport`/`GitTransport` + `union_jsonl`) · `secrets.py` (curated secret patterns) · `hooks.py` (Stop-hook install + soft-failing `hook_sync`) · `engine.py` (the verbs; fail-loud round-trip guard on push, backup-before-overwrite on pull, publish-retry, opt-in secret scan) · `doctor.py` (honesty scan) · `__main__.py` (CLI).
+`pathmap.py` (path-mapping core, no I/O) · `roster.py` (`Participant`/`Roster` + persistence) · `cluster.py` (`Cluster` = one project's tree: `roster.json` + `context/`) · `localstate.py` (per-machine project marker → its clone, remote, branch) · `env.py` (location/clock/machine-id/os/settings/`clone_dir` resolution, all env-overridable) · `gitutil.py` (branch-aware git wrappers: orphan branches, single-branch clone, `ls-remote`) · `transport.py` (`LocalTransport`/`GitTransport` + `project_branch` + `union_jsonl`) · `secrets.py` (curated secret patterns) · `hooks.py` (Stop-hook install + soft-failing `hook_sync`) · `engine.py` (the verbs + `list_projects`; fail-loud round-trip guard on push, backup-before-overwrite on pull, publish-retry, opt-in secret scan) · `doctor.py` (honesty scan) · `__main__.py` (CLI).
 
 The push guard compares against `normalize_jsonl(text)` (compact re-serialization), not raw bytes — it verifies *data* reversibility, not incidental whitespace. Tests are sandboxed via the `env.py` overrides; `CLAUDE_SETTINGS_PATH` redirects hook install away from the real settings.json.
 

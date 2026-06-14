@@ -82,11 +82,11 @@ class GitTransportTest(unittest.TestCase):
     def test_init_to_fresh_remote_then_join(self):
         cl_a = self._use("A", "machine-A", "darwin")
         self._seed(ROOT_A, _jsonl(_rec(ROOT_A), _rec(ROOT_A)))
-        engine.init(ROOT_A, cluster_root=cl_a, remote=self.remote)
-        self.assertTrue(gitutil.remote_has_branch(cl_a))  # branch created on remote
+        engine.init(ROOT_A, cluster=cl_a, remote=self.remote)
+        self.assertTrue(gitutil.remote_has_branch(self.remote, "project/demo"))  # branch on remote
 
         cl_b = self._use("B", "machine-B", "linux")
-        r = engine.join(ROOT_B, cluster_root=cl_b, remote=self.remote)
+        r = engine.join(ROOT_B, cluster=cl_b, remote=self.remote)
         self.assertEqual(r["participants"], 2)
         b_text = _slurp(os.path.join(self._ctx(ROOT_B), "sess.jsonl"))
         self.assertIn(f"{ROOT_B}/a.py", b_text)
@@ -95,10 +95,10 @@ class GitTransportTest(unittest.TestCase):
     def test_full_sync_loop_over_git(self):
         cl_a = self._use("A", "machine-A", "darwin")
         self._seed(ROOT_A, _jsonl(_rec(ROOT_A)))
-        engine.init(ROOT_A, cluster_root=cl_a, remote=self.remote)
+        engine.init(ROOT_A, cluster=cl_a, remote=self.remote)
 
         cl_b = self._use("B", "machine-B", "linux")
-        engine.join(ROOT_B, cluster_root=cl_b, remote=self.remote)
+        engine.join(ROOT_B, cluster=cl_b, remote=self.remote)
         self._seed(ROOT_B, _jsonl(_rec(ROOT_B, "feature.py")), name="feat.jsonl")
         engine.sync(project_root=ROOT_B)  # pull (noop) then push to remote
 
@@ -112,10 +112,10 @@ class GitTransportTest(unittest.TestCase):
     def test_disjoint_sessions_union_across_machines(self):
         cl_a = self._use("A", "machine-A", "darwin")
         self._seed(ROOT_A, _jsonl(_rec(ROOT_A)), name="sessA.jsonl")
-        engine.init(ROOT_A, cluster_root=cl_a, remote=self.remote)
+        engine.init(ROOT_A, cluster=cl_a, remote=self.remote)
 
         cl_b = self._use("B", "machine-B", "linux")
-        engine.join(ROOT_B, cluster_root=cl_b, remote=self.remote)
+        engine.join(ROOT_B, cluster=cl_b, remote=self.remote)
 
         # A authors a second session and pushes.
         self._use("A", "machine-A", "darwin")
@@ -136,10 +136,49 @@ class GitTransportTest(unittest.TestCase):
         engine.sync(project_root=ROOT_B)
         self.assertEqual(self._names(ROOT_B), ["sessA.jsonl", "sessA2.jsonl", "sessB.jsonl"])
 
+    def test_projects_are_isolated_branches(self):
+        # The point of the model: many projects in one repo, each its own orphan
+        # branch; joining one fetches ONLY that project's history.
+        A_ALPHA = "/Users/alice/src/alpha"
+        A_BETA = "/Users/alice/src/beta"
+        B_ALPHA = "/home/bob/work/alpha"
+
+        self._use("A", "machine-A", "darwin")
+        self._seed(A_ALPHA, _jsonl(_rec(A_ALPHA)))
+        engine.init(A_ALPHA, remote=self.remote)          # managed clone, branch project/alpha
+        self._seed(A_BETA, _jsonl(_rec(A_BETA)))
+        engine.init(A_BETA, remote=self.remote)           # branch project/beta
+
+        branches = set(gitutil.remote_branches(self.remote))
+        self.assertEqual(branches, {"main", "project/alpha", "project/beta"})
+        self.assertEqual(engine.list_projects(self.remote), ["alpha", "beta"])
+
+        # Machine B joins ONLY alpha.
+        self._use("B", "machine-B", "linux")
+        engine.join(B_ALPHA, remote=self.remote)
+        clone = env.clone_dir("alpha")                    # under B's CONVERGENCE_HOME
+        refs = gitutil._git(["branch", "-a"], cwd=clone).stdout
+        self.assertIn("project/alpha", refs)
+        self.assertNotIn("beta", refs)                    # beta never fetched
+        self.assertNotEqual(                              # beta's objects unreachable
+            gitutil._git(["log", "project/beta"], cwd=clone, check=False).returncode, 0)
+        self.assertTrue(os.path.exists(os.path.join(self._ctx(B_ALPHA), "sess.jsonl")))
+
+    def test_fresh_cluster_gets_main_readme(self):
+        self._use("A", "machine-A", "darwin")
+        self._seed(ROOT_A, _jsonl(_rec(ROOT_A)))
+        engine.init(ROOT_A, remote=self.remote)
+        self.assertIn("main", gitutil.remote_branches(self.remote))
+        # main holds the README; the project branch does NOT.
+        tmp = os.path.join(self.tmp, "inspect")
+        gitutil.clone_single_branch(self.remote, "main", tmp)
+        self.assertTrue(os.path.exists(os.path.join(tmp, "README.md")))
+        self.assertFalse(os.path.exists(os.path.join(tmp, "roster.json")))
+
     def test_history_accumulates_on_remote(self):
         cl_a = self._use("A", "machine-A", "darwin")
         self._seed(ROOT_A, _jsonl(_rec(ROOT_A)))
-        engine.init(ROOT_A, cluster_root=cl_a, remote=self.remote)
+        engine.init(ROOT_A, cluster=cl_a, remote=self.remote)
         self._seed(ROOT_A, _jsonl(_rec(ROOT_A), _rec(ROOT_A, "b.py")))
         engine.push(project_root=ROOT_A)
         log = gitutil._git(["log", "--oneline"], cwd=cl_a).stdout.strip().splitlines()

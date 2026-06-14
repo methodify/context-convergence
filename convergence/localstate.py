@@ -20,10 +20,11 @@ from . import env
 class LocalState:
     project_id: str
     machine_id: str
-    cluster_root: str
+    cluster_root: str  # this project's working clone (git) or local cluster dir
     project_root: str
     encoded_dir: str
     remote: str | None = None
+    branch: str | None = None
     last_converged: str | None = None
     last_converged_commit: str | None = None
 

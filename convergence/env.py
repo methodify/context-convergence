@@ -43,6 +43,12 @@ def hook_log_path() -> str:
     return os.path.join(convergence_home(), "hook.log")
 
 
+def clone_dir(project_id: str) -> str:
+    """Where convergence keeps this project's single-branch working clone, so a
+    user only ever hands the tool a --remote, not a per-project checkout path."""
+    return os.path.join(convergence_home(), "clones", project_id)
+
+
 def home_dir() -> str:
     return os.path.expanduser("~")
 

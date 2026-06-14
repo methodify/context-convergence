@@ -25,12 +25,12 @@ from .pathmap import DEFAULT_SENTINEL, canonicalize_jsonl_root, localize_jsonl_r
 
 
 def _cmd_init(args) -> int:
-    r = engine.init(args.project_root, cluster_root=args.cluster,
-                    project_id=args.project_id, remote=args.remote,
-                    rewrite_home=not args.no_rewrite_home)
+    r = engine.init(args.project_root, remote=args.remote, cluster=args.cluster,
+                    project_id=args.project_id, rewrite_home=not args.no_rewrite_home)
     print(f"init '{r['project_id']}' (machine {r['machine_id']}): "
           f"{r['files']} file(s), {r['substitutions']} path(s) canonicalized")
-    print(f"  cluster: {r['cluster']}" + (f"  (remote {r['remote']})" if r["remote"] else ""))
+    where = f"branch {r['branch']} on {r['remote']}" if r["remote"] else f"local {r['cluster']}"
+    print(f"  {where}\n  clone: {r['cluster']}")
     return 0
 
 
@@ -43,13 +43,24 @@ def _cmd_sync(args) -> int:
 
 
 def _cmd_join(args) -> int:
-    r = engine.join(args.project_root, cluster_root=args.cluster,
-                    project_id=args.project_id, remote=args.remote)
+    r = engine.join(args.project_root, remote=args.remote, cluster=args.cluster,
+                    project_id=args.project_id)
     print(f"join '{r['project_id']}' (machine {r['machine_id']}): "
           f"{r['files']} file(s), {r['substitutions']} path(s) localized -> {r['local_dir']}")
     print(f"  roster now has {r['participants']} participant(s)")
     if r["backup"]:
         print(f"  backup: {r['backup']}")
+    return 0
+
+
+def _cmd_projects(args) -> int:
+    ids = engine.list_projects(args.remote)
+    if not ids:
+        print("no projects in this cluster yet")
+        return 0
+    print(f"{len(ids)} project(s) in {args.remote}:")
+    for pid in ids:
+        print(f"  {pid}")
     return 0
 
 
@@ -186,8 +197,9 @@ def main(argv=None) -> int:
 
     i = sub.add_parser("init", help="register a project in the cluster (first machine)")
     i.add_argument("project_root", nargs="?", default=None)
-    i.add_argument("--cluster", required=True)
-    i.add_argument("--remote", default=None, help="git remote URL/path (omit for a local cluster dir)")
+    i.add_argument("--remote", default=None, help="git remote URL/path (the cluster repo)")
+    i.add_argument("--cluster", default=None,
+                   help="local cluster dir (no git), or override the managed clone path")
     i.add_argument("--project-id", default=None)
     i.add_argument("--no-rewrite-home", action="store_true",
                    help="rewrite project root + context dir only; leave the home prefix as-is")
@@ -195,10 +207,14 @@ def main(argv=None) -> int:
 
     j = sub.add_parser("join", help="pull a project's context onto a new machine, localized")
     j.add_argument("project_root", nargs="?", default=None)
-    j.add_argument("--cluster", required=True)
-    j.add_argument("--remote", default=None, help="git remote URL/path (omit for a local cluster dir)")
+    j.add_argument("--remote", default=None, help="git remote URL/path (the cluster repo)")
+    j.add_argument("--cluster", default=None, help="local cluster dir, or managed-clone override")
     j.add_argument("--project-id", default=None)
     j.set_defaults(func=_cmd_join)
+
+    pr = sub.add_parser("projects", help="list projects (branches) in a cluster repo")
+    pr.add_argument("--remote", required=True)
+    pr.set_defaults(func=_cmd_projects)
 
     pushp = sub.add_parser("push", help="localize->canonicalize local context into the cluster")
     pushp.add_argument("project_root", nargs="?", default=None)

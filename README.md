@@ -20,19 +20,29 @@ This puts a `convergence` command on your PATH.
 
 ## Quickstart
 
-```sh
-# First machine — register this project's context in a cluster (a git repo).
-convergence init ~/src/proj --cluster ~/clusters/mine --remote git@github.com:you/context-cluster.git
+Your cluster is **one private git repo**. Each project is a branch
+(`project/<id>`), and convergence manages a single-branch clone per project under
+`~/.convergence/clones/` — so you only ever pass `--remote`.
 
-# Another machine — pull it down, localized to this machine's paths.
-convergence join ~/src/proj --cluster ~/clusters/mine --remote git@github.com:you/context-cluster.git
+```sh
+# First machine — register this project's context in the cluster.
+convergence init ~/src/proj --remote git@github.com:you/context-cluster.git
+
+# Another machine — pull just this project down, localized to local paths.
+convergence join ~/src/proj --remote git@github.com:you/context-cluster.git
 
 # Day to day.
-convergence sync     # pull then push — run it whenever, or via the hook below
-convergence status   # what's dirty / behind, plus the roster
+convergence sync                                   # pull then push (or via the hook below)
+convergence status                                 # what's dirty / behind, plus the roster
+convergence projects --remote <url>                # list projects in the cluster
 ```
 
-Omit `--remote` to use a plain local directory as the cluster (no git).
+Because each project is its own orphan branch, **joining one project never
+downloads the others' history** — a machine fetches only what it asks for. Add a
+hundred projects to one repo and a checkout is still just the one you want.
+
+Prefer a local directory over git? Pass `--cluster ~/some/dir` instead of
+`--remote` (one project per dir, no git).
 
 ## Make it seamless
 
@@ -63,9 +73,11 @@ Context is irreplaceable, so the tool is conservative:
 
 ## How it works
 
-The cluster stores a **canonical form** in which machine-specific anchors are
-replaced by sentinels, plus a **roster** describing each machine's layout. Three
-rewrite tiers (a cluster-wide policy fixed at `init`):
+One private git repo is your **cluster**; each project is an orphan branch
+`project/<id>` (so projects are storage-isolated). A branch stores a **canonical
+form** in which machine-specific anchors are replaced by sentinels, plus a
+**roster** describing each machine's layout. Three rewrite tiers (a cluster-wide
+policy fixed at `init`):
 
 1. project root → `{{CC_PROJECT_ROOT}}`
 2. `~/.claude/projects/<encoded>` → `{{CC_PROJECT_CONTEXT_DIR}}`

@@ -92,7 +92,7 @@ class HookSyncTest(unittest.TestCase):
         os.makedirs(d)
         with open(os.path.join(d, "sess.jsonl"), "w") as fh:
             fh.write(json.dumps({"cwd": ROOT}) + "\n")
-        engine.init(ROOT, cluster_root=os.path.join(self.tmp, "cluster"))
+        engine.init(ROOT, cluster=os.path.join(self.tmp, "cluster"))
 
         rc = hooks.hook_sync(project_root=ROOT)
         self.assertEqual(rc, 0)
