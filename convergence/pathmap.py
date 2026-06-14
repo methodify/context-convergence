@@ -36,6 +36,12 @@ import os
 import re
 
 DEFAULT_SENTINEL = "{{CC_PROJECT_ROOT}}"
+# The three rewrite tiers (cluster-wide policy; see build_mappings). Ordered here
+# most-specific to least; applied longest-anchor-first so specific beats general.
+SENTINEL_PROJECT_ROOT = "{{CC_PROJECT_ROOT}}"
+SENTINEL_CONTEXT_DIR = "{{CC_PROJECT_CONTEXT_DIR}}"  # <home>/.claude/projects/<encoded>
+SENTINEL_HOME = "{{CC_HOME}}"
+ALL_SENTINELS = (SENTINEL_CONTEXT_DIR, SENTINEL_PROJECT_ROOT, SENTINEL_HOME)
 
 # A leading alphanumeric would mean the root is the tail of a longer path run
 # (e.g. `/mnt/Users/.../catalog` — a different path that ends with our root).
@@ -111,37 +117,98 @@ def _boundary_pattern(root: str) -> re.Pattern[str]:
     )
 
 
-def canonicalize_value(
-    s: str, root: str, sentinel: str = DEFAULT_SENTINEL
-) -> tuple[str, int]:
-    """Canonicalize one decoded string value. Escapes literal sentinels, then
-    replaces boundary-anchored root occurrences. Returns (value, n_root_subs)."""
-    s = _escape_literals(s, sentinel)
-    return _boundary_pattern(root).subn(sentinel, s)
+Mapping = tuple[str, str]  # (anchor path, sentinel)
 
 
-def localize_value(
-    s: str, root: str, sentinel: str = DEFAULT_SENTINEL
-) -> tuple[str, int]:
-    """Localize one decoded string value — the inverse of canonicalize_value.
-    Expands real (zero-`_LIT`) sentinels to root, then restores escaped
-    literals. Returns (value, n_sentinel_expansions)."""
-    base, close = _sentinel_parts(sentinel)
-    exact = re.compile(re.escape(base) + r"(?!_LIT)" + re.escape(close))
-    s, n = exact.subn(lambda _m: root, s)  # lambda: root may contain backslashes
-    s = _unescape_literals(s, sentinel)
+def build_mappings(home: str, project_root: str, encoded_dir: str,
+                   rewrite_home: bool = True) -> list[Mapping]:
+    """The cluster-wide rewrite tiers for one machine, ordered longest-anchor
+    first so the specific beats the general:
+
+      1. project root                  -> {{CC_PROJECT_ROOT}}
+      2. <home>/.claude/projects/<enc> -> {{CC_PROJECT_CONTEXT_DIR}}  (the tool's
+         own context dir; both home AND the lossy encoded segment change per
+         machine, so it gets its own exact sentinel)
+      3. <home>                        -> {{CC_HOME}}  (optional; covers dotfiles,
+         other ~/.claude paths, and sibling projects by the ~/ convention)
+
+    Every machine builds this with its OWN home/root/encoded but the SAME policy,
+    so the canonical form is identical across machines.
+    """
+    m: list[Mapping] = [
+        (project_root, SENTINEL_PROJECT_ROOT),
+        (f"{home}/.claude/projects/{encoded_dir}", SENTINEL_CONTEXT_DIR),
+    ]
+    if rewrite_home:
+        m.append((home, SENTINEL_HOME))
+    return sorted(m, key=lambda t: len(t[0]), reverse=True)
+
+
+def canonicalize_value(s: str, mappings: list[Mapping]) -> tuple[str, int]:
+    """Canonicalize one decoded string value against an ordered mapping set.
+    Escapes any literal sentinels first, then boundary-replaces each anchor
+    (longest first). Returns (value, n_substitutions)."""
+    s = _escape_literals_multi(s, [sent for _, sent in mappings])
+    n = 0
+    for anchor, sentinel in mappings:
+        s, c = _boundary_pattern(anchor).subn(sentinel, s)
+        n += c
     return s, n
+
+
+def localize_value(s: str, mappings: list[Mapping]) -> tuple[str, int]:
+    """Inverse of canonicalize_value: expand each real (zero-`_LIT`) sentinel to
+    its anchor, then restore escaped literal sentinels."""
+    n = 0
+    for anchor, sentinel in mappings:
+        base, close = _sentinel_parts(sentinel)
+        exact = re.compile(re.escape(base) + r"(?!_LIT)" + re.escape(close))
+        s, c = exact.subn(lambda _m, a=anchor: a, s)  # a=: bind; anchors may hold \
+        n += c
+    s = _unescape_literals_multi(s, [sent for _, sent in mappings])
+    return s, n
+
+
+def _escape_literals_multi(text: str, sentinels) -> str:
+    for sent in sentinels:
+        text = _escape_literals(text, sent)
+    return text
+
+
+def _unescape_literals_multi(text: str, sentinels) -> str:
+    for sent in sentinels:
+        text = _unescape_literals(text, sent)
+    return text
+
+
+def _single(root: str, sentinel: str) -> list[Mapping]:
+    return [(root, sentinel)]
+
+
+def canonicalize_value_root(s, root, sentinel=DEFAULT_SENTINEL):
+    """Single-anchor convenience (root only) used by lower-level callers/tests."""
+    return canonicalize_value(s, _single(root, sentinel))
+
+
+def localize_value_root(s, root, sentinel=DEFAULT_SENTINEL):
+    return localize_value(s, _single(root, sentinel))
 
 
 # --------------------------------------------------------------------------- #
 # JSONL entry points (the real surface — walk records, transform string leaves)
 # --------------------------------------------------------------------------- #
 def _map_strings(obj, fn):
-    """Return obj with fn applied to every string leaf; accumulate a count."""
+    """Return obj with fn applied to every string leaf AND every dict key;
+    accumulate a count. Keys matter: tool results keep path-keyed maps (e.g.
+    snapshot `trackedFileBackups` keyed by absolute file path), and those keys
+    are just as machine-specific as values."""
     if isinstance(obj, dict):
         out = {}
         total = 0
         for k, v in obj.items():
+            if isinstance(k, str):
+                k, ck = fn(k)
+                total += ck
             out[k], c = _map_strings(v, fn)
             total += c
         return out, total
@@ -180,18 +247,23 @@ def _transform_jsonl(text: str, fn) -> tuple[str, int]:
     return "".join(out_lines), total
 
 
-def canonicalize_jsonl(
-    text: str, root: str, sentinel: str = DEFAULT_SENTINEL
-) -> tuple[str, int]:
+def canonicalize_jsonl(text: str, mappings: list[Mapping]) -> tuple[str, int]:
     """Canonicalize a full JSONL document (local form -> canonical form)."""
-    return _transform_jsonl(text, lambda s: canonicalize_value(s, root, sentinel))
+    return _transform_jsonl(text, lambda s: canonicalize_value(s, mappings))
 
 
-def localize_jsonl(
-    text: str, root: str, sentinel: str = DEFAULT_SENTINEL
-) -> tuple[str, int]:
-    """Localize a full JSONL document (canonical form -> local form for root)."""
-    return _transform_jsonl(text, lambda s: localize_value(s, root, sentinel))
+def localize_jsonl(text: str, mappings: list[Mapping]) -> tuple[str, int]:
+    """Localize a full JSONL document (canonical form -> local form)."""
+    return _transform_jsonl(text, lambda s: localize_value(s, mappings))
+
+
+def canonicalize_jsonl_root(text, root, sentinel=DEFAULT_SENTINEL):
+    """Single-anchor convenience (root only)."""
+    return canonicalize_jsonl(text, _single(root, sentinel))
+
+
+def localize_jsonl_root(text, root, sentinel=DEFAULT_SENTINEL):
+    return localize_jsonl(text, _single(root, sentinel))
 
 
 def normalize_jsonl(text: str) -> str:

@@ -4,14 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**Sprints 0–4 are complete** (2026-06-13/14), all stdlib Python, 58 tests green.
+**Sprints 0–4 + the home-path gap are complete** (2026-06-13/14), all stdlib Python, 64 tests green.
 - **Sprint 0** — canonicalize/localize core + `doctor`. Idempotency invariant proven against real transcripts (242 / 105,623 / 42,714 records — all round-trip losslessly). See `docs/sprint-0-findings.md` for what the dogfooding overturned.
 - **Sprint 1** — single-machine roundtrip: `init`/`push`/`pull`/`status` against a local cluster dir, real `roster.json`, roster of one. Byte-identical roundtrip proven on this project's own context.
 - **Sprint 2** — second machine: `join`, multi-participant roster, localize-on-checkout. Headline loop verified — context authored on machine B reaches machine A localized to A's paths, cluster staying machine-neutral.
 - **Sprint 3** — git transport: `--remote` makes the cluster a working clone of a private git repo; `sync` = pull then push. Verified over a hermetic bare repo: init→join→sync loop, disjoint-session union across machines, accumulating git history.
 - **Sprint 4** — seamless layer + safety: the blessed Stop-hook (`hook install` wires a global Claude Code Stop hook running `hook-sync`, which resolves the project from cwd and syncs, failing soft so it can never break a session) and the opt-in secret scan (`scan`, `push --scan-secrets [--strict]`, design §6.5).
+- **Home-path gap closed** — three-tier rewriting (root + own context dir + home prefix) replaced project-root-only. On real corpora this drove home residue from thousands to ~0 (catalog 9144→0); the key unlock was rewriting path-keyed dict KEYS, not just values. The remaining handful are lossless nested/malformed paths (advisory).
 
-`docs/context-convergence-design.md` remains the product source of truth. The v1 build order is essentially done; **remaining** is optional Sprint 5 (background watcher mode) and the known v1 gaps in `docs/sprint-0-findings.md` (chiefly: `~/.claude/projects/<encoded>/…` home-path self-references aren't rewritten, so they go stale on another machine).
+`docs/context-convergence-design.md` remains the product source of truth. The v1 build order is done. **Remaining** is optional: Sprint 5 (background watcher mode, §5.2) and packaging (a `pyproject.toml` for a clean `convergence` console script — the Stop hook currently runs via `PYTHONPATH`).
 
 ### Transport model (Sprint 3)
 
@@ -57,8 +58,12 @@ The push guard compares against `normalize_jsonl(text)` (compact re-serializatio
 
 The whole product is a bet that **the path-surface inside transcripts is enumerable and rewriting is safely reversible.** Everything else is plumbing.
 
-- **Canonical form** is what lives in the cluster repo: every occurrence of a participant's project root is replaced by a sentinel (`{{CC_PROJECT_ROOT}}`). The cluster never stores any one machine's local paths as authoritative — this is what keeps the repo diffable and lets git's own merge machinery work instead of every line colliding on differing absolute paths.
-- **canonicalize** (local → canonical) and **localize** (canonical → local) are the two core transforms, parameterized by a machine's **roster** entry (`home`, `project_root`, `encoded_dir`, `os`).
+- **Canonical form** is what lives in the cluster repo: machine-specific anchors are replaced by sentinels. The cluster never stores any one machine's local paths as authoritative — this is what keeps the repo diffable and lets git's own merge machinery work instead of every line colliding on differing absolute paths.
+- **Three rewrite tiers** (`build_mappings`, applied longest-anchor-first so specific beats general), a cluster-wide policy fixed at init (`roster.rewrite_home`):
+  1. project root → `{{CC_PROJECT_ROOT}}`
+  2. `<home>/.claude/projects/<encoded>` → `{{CC_PROJECT_CONTEXT_DIR}}` (own context dir; both home AND the lossy encoded segment change per machine, so it gets its own exact sentinel)
+  3. `<home>` → `{{CC_HOME}}` (covers `~/.claude/*`, dotfiles, and sibling projects by the `~/src/{project}` convention; opt out with `init --no-rewrite-home`)
+- **canonicalize** (local → canonical) and **localize** (canonical → local) are the two core transforms, parameterized by a machine's **roster** entry (`home`, `project_root`, `encoded_dir`).
 - The correctness core is the invariant `canonicalize(localize(x)) == x` and vice versa, for any participant. This must have **property tests** — it is the spec.
 
 ### Hard rules for the rewriter
@@ -67,14 +72,15 @@ These were validated against real data in Sprint 0 — see `docs/sprint-0-findin
 
 - **Rewrite JSON-decoded string values, not raw file text.** In raw JSONL a path after a newline reads `...catalog\n/Users/...` — the `\n` escape makes the boundary indistinguishable from `/mnt/Users/.../catalog` (root as suffix of a longer path, must NOT rewrite). Parse each line, rewrite within each decoded string leaf, re-serialize. Compact dumps (`ensure_ascii=False, separators=(',',':')`) reproduce Claude Code's bytes exactly (verified 105,623/105,623), so diffs stay clean.
 - **The encoded dir name is lossy — never decode it.** Encoding maps every non-alphanumeric char to `-`, so the root is unrecoverable from the dir name. Get the root from a `cwd` field or the roster. `infer_project_root` recovers it by *encoding* cwd ancestors and matching the dir name (also handles subdir cwds).
-- **Boundary-anchored, never naked substring replace.** Rewrite the root only as a whole path prefix: not preceded by alphanumeric; not followed by a name char (`catalog-backup`/`catalog2`/`catalog_old` survive); a `.` is an extension only if followed by alphanumeric (`catalog.bak` survives) but a trailing `.` before whitespace/quote/end is punctuation and IS rewritten.
+- **Boundary-anchored, never naked substring replace.** Rewrite an anchor only as a whole path prefix: not preceded by alphanumeric; not followed by a name char (`catalog-backup`/`catalog2`/`catalog_old` survive); a `.` is an extension only if followed by alphanumeric (`catalog.bak` survives) but a trailing `.` before whitespace/quote/end is punctuation and IS rewritten. The leading "not preceded by alphanumeric" guard protects nested paths (e.g. macOS firmlink `/System/Volumes/Data/Users/…`) — at the cost of leaving rare malformed doubled-home paths un-rewritten (lossless; doctor reports them as advisory).
+- **Rewrite dict KEYS, not just values.** Tool results keep path-keyed maps (snapshot `trackedFileBackups` keyed by absolute path); those keys are as machine-specific as values. `_map_strings` transforms both. (Missing this left thousands of un-rewritten home refs — caught by dogfooding doctor's residue check.)
 
 Other invariants:
 
-- **v1 scope: project-root only.** Refs outside the project tree (home paths incl. `~/.claude/projects/<encoded>/…`, sibling roots) are **flagged, not rewritten** (doctor surfaces them). On machine B these stay machine-A-specific — a known v1 limitation (findings §"Known v1 limitations").
+- **Refs with no exact equivalent stay machine-specific** (lossless, advisory in doctor): another project's context dir (its encoded segment can't be recomputed for B), nested/firmlink paths, malformed doubled-home paths. Everything with an exact per-machine equivalent (root, own context dir, home prefix) IS rewritten.
 - **Literal-sentinel escaping is load-bearing here.** This repo's own context contains `{{CC_PROJECT_ROOT}}` verbatim. The `{{S(_LIT)*}}` escape family makes canonicalize/localize a true inverse pair; don't remove it or convergence can't sync its own context.
 - **Fail loud, never guess.** Never ship a half-rewritten transcript. Context is irreplaceable; the prime directive is *never silently corrupt or lose context.*
-- **Back up before localize.** Pull writes into `~/.claude/projects/` — back up the target (timestamped, kept N deep) before overwriting. *(Not yet built — Sprint 4.)*
+- **Back up before localize.** Pull writes into `~/.claude/projects/` — back up the target (timestamped) before overwriting (`engine._backup_local_context`).
 
 ## Working with real context data
 
@@ -116,7 +122,6 @@ Sync strategy is **git + append-mostly union + last-writer-wins-with-backup**, n
 
 These are open questions from the design — surface them rather than picking for the user:
 - **`project_id` derivation** — manual vs. seeded from the git remote URL (the join key must be stable and machine-neutral).
-- **Home-dir refs outside project root** — flag-only (v1 rec) vs. rewrite.
 - **Scope** — sync `~/.claude/projects/` only, or also opt-in repo-local `.mcc/` state (v1 rec: context dir only).
 
 ## Org context

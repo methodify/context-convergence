@@ -7,12 +7,12 @@ trusts the tool with irreplaceable context.
 Reports:
   - Inferred project root (and whether inference succeeded).
   - Distinct `cwd` values, flagging subdir-cwds and sibling roots.
-  - Path-surface: JSON field locations where the project root appears
-    (rewritable) vs. where home-but-not-root paths appear (flagged, per the v1
-    project-root-only policy).
-  - Sentinel collisions: content that already literally contains the sentinel.
-  - A real-data idempotency check: localize(canonicalize(file)) == file, and the
-    canonical form contains no surviving root occurrence.
+  - Per-tier rewrite coverage: how many string values contain the project root,
+    the own context dir, and (under the home-rewrite policy) the home prefix.
+  - Residue: any real project-root or home path still present after canonicalize
+    (would be machine-specific in the cluster).
+  - A real-data idempotency check: localize(canonicalize(file)) reverses without
+    data loss.
 """
 
 from __future__ import annotations
@@ -23,12 +23,17 @@ import os
 from collections import Counter
 from dataclasses import dataclass, field
 
+from . import env
 from .pathmap import (
-    DEFAULT_SENTINEL,
+    SENTINEL_CONTEXT_DIR,
+    SENTINEL_HOME,
+    SENTINEL_PROJECT_ROOT,
     canonicalize_jsonl,
     infer_project_root,
     localize_jsonl,
+    normalize_jsonl,
 )
+from .roster import Participant
 
 
 def _iter_records(path: str):
@@ -43,16 +48,15 @@ def _iter_records(path: str):
                 continue
 
 
-def _walk_strings(obj, prefix=""):
-    """Yield (json_path, string_value) for every string leaf."""
+def _walk_strings(obj):
     if isinstance(obj, dict):
-        for k, v in obj.items():
-            yield from _walk_strings(v, f"{prefix}.{k}")
+        for v in obj.values():
+            yield from _walk_strings(v)
     elif isinstance(obj, list):
         for v in obj:
-            yield from _walk_strings(v, f"{prefix}[]")
+            yield from _walk_strings(v)
     elif isinstance(obj, str):
-        yield prefix, obj
+        yield obj
 
 
 @dataclass
@@ -61,43 +65,44 @@ class DoctorReport:
     files: list[str] = field(default_factory=list)
     record_count: int = 0
     project_root: str | None = None
+    home: str = ""
+    rewrite_home: bool = True
     cwds: Counter = field(default_factory=Counter)
-    root_fields: Counter = field(default_factory=Counter)
-    flagged_home_fields: Counter = field(default_factory=Counter)
-    sentinel_collisions: int = 0
+    tier_hits: Counter = field(default_factory=Counter)  # sentinel label -> #strings
+    residue_root: int = 0
+    residue_home: int = 0
     roundtrip_failures: list[str] = field(default_factory=list)
-    residue_failures: list[str] = field(default_factory=list)
 
     @property
     def subdir_cwds(self) -> list[str]:
         if not self.project_root:
             return []
-        return [c for c in self.cwds if c != self.project_root and c.startswith(self.project_root + "/")]
+        return [c for c in self.cwds
+                if c != self.project_root and c.startswith(self.project_root + "/")]
 
     @property
     def sibling_roots(self) -> list[str]:
-        """cwds neither equal to nor under the project root — separate trees."""
         if not self.project_root:
             return list(self.cwds)
-        return [
-            c for c in self.cwds
-            if c != self.project_root and not c.startswith(self.project_root + "/")
-        ]
+        return [c for c in self.cwds
+                if c != self.project_root and not c.startswith(self.project_root + "/")]
 
     @property
     def ok(self) -> bool:
-        return (
-            self.project_root is not None
-            and not self.roundtrip_failures
-            and not self.residue_failures
-        )
+        # Home residue is advisory, not a failure: under best-effort home
+        # rewriting, nested paths (e.g. /System/Volumes/Data/Users/... firmlinks)
+        # and malformed doubled-home paths legitimately remain, and they
+        # round-trip losslessly. Only lossy round-trips or project-root residue
+        # are real problems.
+        return (self.project_root is not None
+                and not self.roundtrip_failures
+                and self.residue_root == 0)
 
 
-def scan(context_dir, root=None, home=None, sentinel=DEFAULT_SENTINEL) -> DoctorReport:
-    rep = DoctorReport(context_dir=context_dir)
+def scan(context_dir, root=None, home=None, rewrite_home=True) -> DoctorReport:
+    rep = DoctorReport(context_dir=context_dir, rewrite_home=rewrite_home)
     rep.files = sorted(glob.glob(os.path.join(context_dir, "*.jsonl")))
 
-    # Pass 1: collect cwds so we can infer the root if not supplied.
     for f in rep.files:
         for rec in _iter_records(f):
             rep.record_count += 1
@@ -105,71 +110,69 @@ def scan(context_dir, root=None, home=None, sentinel=DEFAULT_SENTINEL) -> Doctor
                 rep.cwds[rec["cwd"]] += 1
 
     rep.project_root = root or infer_project_root(
-        os.path.basename(context_dir.rstrip("/")), list(rep.cwds)
-    )
-    home = home or os.path.expanduser("~")
+        os.path.basename(context_dir.rstrip("/")), list(rep.cwds))
+    rep.home = home or env.home_dir()
+    if not rep.project_root:
+        return rep
 
-    if rep.project_root:
-        root_str = rep.project_root
-        # Pass 2: path-surface inventory + per-file idempotency on real bytes.
-        for f in rep.files:
-            with open(f, encoding="utf-8", errors="replace") as fh:
-                original = fh.read()
-            canon, _ = canonicalize_jsonl(original, root_str, sentinel)
-            back, _ = localize_jsonl(canon, root_str, sentinel)
-            if back != original:
-                rep.roundtrip_failures.append(f)
-            # Canonical form must retain no boundary-anchored root occurrence.
-            if root_str in canon:
-                rep.residue_failures.append(f)
+    participant = Participant("local", env.detected_os(), rep.home, rep.project_root)
+    mappings = participant.mappings(rewrite_home)
+    context_anchor = f"{rep.home}/.claude/projects/{participant.encoded_dir}"
 
-            for rec in _iter_records(f):
-                for jpath, sval in _walk_strings(rec):
-                    if sentinel in sval:
-                        rep.sentinel_collisions += 1
-                    if root_str in sval:
-                        rep.root_fields[jpath] += 1
-                    elif home in sval:
-                        rep.flagged_home_fields[jpath] += 1
+    for f in rep.files:
+        with open(f, encoding="utf-8", errors="replace") as fh:
+            original = fh.read()
+        canon, _ = canonicalize_jsonl(original, mappings)
+        if localize_jsonl(canon, mappings)[0] != normalize_jsonl(original):
+            rep.roundtrip_failures.append(f)
+        if rep.project_root in canon:
+            rep.residue_root += canon.count(rep.project_root)
+        if rewrite_home and rep.home in canon:
+            rep.residue_home += canon.count(rep.home)
+
+    # Per-tier coverage: count string values mentioning each anchor.
+    for f in rep.files:
+        for rec in _iter_records(f):
+            for sval in _walk_strings(rec):
+                if context_anchor in sval:
+                    rep.tier_hits[SENTINEL_CONTEXT_DIR] += 1
+                elif rep.project_root in sval:
+                    rep.tier_hits[SENTINEL_PROJECT_ROOT] += 1
+                elif rewrite_home and rep.home in sval:
+                    rep.tier_hits[SENTINEL_HOME] += 1
     return rep
 
 
 def format_report(rep: DoctorReport) -> str:
-    L = []
-    L.append(f"doctor: {rep.context_dir}")
-    L.append(f"  files: {len(rep.files)}   records: {rep.record_count}")
-    if rep.project_root:
-        L.append(f"  project root: {rep.project_root}  (inferred OK)")
-    else:
+    L = [f"doctor: {rep.context_dir}",
+         f"  files: {len(rep.files)}   records: {rep.record_count}"]
+    if not rep.project_root:
         L.append("  project root: COULD NOT INFER — supply --root explicitly")
         L.append(f"    observed cwds: {list(rep.cwds)[:5]}")
         return "\n".join(L)
 
+    L.append(f"  project root: {rep.project_root}  (inferred OK)")
+    L.append(f"  home: {rep.home}   rewrite-home policy: {'on' if rep.rewrite_home else 'off'}")
     if rep.subdir_cwds:
         L.append(f"  note: {len(rep.subdir_cwds)} subdir cwd(s) under root (handled): "
                  + ", ".join(rep.subdir_cwds[:3]))
     if rep.sibling_roots:
-        L.append(f"  FLAG: {len(rep.sibling_roots)} sibling root(s) outside project "
-                 "(not rewritten in v1):")
+        L.append(f"  note: {len(rep.sibling_roots)} sibling root(s) outside project "
+                 + ("(rewritten via {{CC_HOME}})" if rep.rewrite_home else "(flagged, not rewritten)") + ":")
         for s in rep.sibling_roots[:5]:
             L.append(f"        {s}")
 
-    L.append(f"  rewritable — root appears in {sum(rep.root_fields.values())} string(s):")
-    for jp, n in rep.root_fields.most_common(12):
-        L.append(f"        {n:7d}  {jp or '<string>'}")
-    if rep.flagged_home_fields:
-        L.append(f"  flagged — home-but-not-root paths in "
-                 f"{sum(rep.flagged_home_fields.values())} string(s) (left as-is):")
-        for jp, n in rep.flagged_home_fields.most_common(8):
-            L.append(f"        {n:7d}  {jp or '<string>'}")
-    if rep.sentinel_collisions:
-        L.append(f"  note: sentinel string already present in {rep.sentinel_collisions} "
-                 "place(s); escaped on canonicalize (round-trip verified below).")
-
+    L.append("  rewrite coverage (string values per tier):")
+    for label in (SENTINEL_PROJECT_ROOT, SENTINEL_CONTEXT_DIR, SENTINEL_HOME):
+        L.append(f"        {rep.tier_hits.get(label, 0):7d}  {label}")
     L.append("  idempotency on real data:")
-    L.append(f"        round-trip localize(canonicalize(x))==x : "
+    L.append("        round-trip localize(canonicalize(x)) == x : "
              + ("PASS" if not rep.roundtrip_failures else f"FAIL ({len(rep.roundtrip_failures)})"))
-    L.append(f"        no root residue after canonicalize        : "
-             + ("PASS" if not rep.residue_failures else f"FAIL ({len(rep.residue_failures)})"))
+    L.append(f"        residue — project root in canonical       : "
+             + ("PASS" if rep.residue_root == 0 else f"{rep.residue_root} occurrence(s)"))
+    if rep.rewrite_home:
+        L.append(f"        residue — home path in canonical (advisory): "
+                 + ("PASS" if rep.residue_home == 0
+                    else f"{rep.residue_home} (nested/malformed paths; lossless)"))
     L.append(f"  => {'OK' if rep.ok else 'NEEDS ATTENTION'}")
     return "\n".join(L)

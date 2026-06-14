@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from .pathmap import (
     DEFAULT_SENTINEL,
+    build_mappings,
     canonicalize_jsonl,
     encode_project_dir,
     localize_jsonl,
@@ -21,7 +22,11 @@ from .pathmap import (
 
 @dataclass
 class Participant:
-    """One machine's entry — both its path identity and its sync bookkeeping."""
+    """One machine's entry — both its path identity and its sync bookkeeping.
+
+    The path identity is `home` + `project_root`; `encoded_dir` is derived. From
+    these (plus the cluster's rewrite-home policy) it builds the ordered mapping
+    set that canonicalize/localize use."""
 
     machine_id: str
     os: str
@@ -36,11 +41,14 @@ class Participant:
         Computed (encoding is one-way) — never decoded. See pathmap §1."""
         return encode_project_dir(self.project_root)
 
-    def canonicalize(self, text: str, sentinel: str = DEFAULT_SENTINEL) -> tuple[str, int]:
-        return canonicalize_jsonl(text, self.project_root, sentinel)
+    def mappings(self, rewrite_home: bool = True):
+        return build_mappings(self.home, self.project_root, self.encoded_dir, rewrite_home)
 
-    def localize(self, text: str, sentinel: str = DEFAULT_SENTINEL) -> tuple[str, int]:
-        return localize_jsonl(text, self.project_root, sentinel)
+    def canonicalize(self, text: str, rewrite_home: bool = True) -> tuple[str, int]:
+        return canonicalize_jsonl(text, self.mappings(rewrite_home))
+
+    def localize(self, text: str, rewrite_home: bool = True) -> tuple[str, int]:
+        return localize_jsonl(text, self.mappings(rewrite_home))
 
     def to_dict(self) -> dict:
         return {
@@ -68,7 +76,8 @@ class Participant:
 @dataclass
 class Roster:
     project_id: str
-    canonical_sentinel: str = DEFAULT_SENTINEL
+    canonical_sentinel: str = DEFAULT_SENTINEL  # informational: the project-root sentinel
+    rewrite_home: bool = True  # cluster-wide policy: also rewrite the home prefix
     participants: list[Participant] = field(default_factory=list)
 
     def get(self, machine_id: str) -> Participant | None:
@@ -87,6 +96,7 @@ class Roster:
         return {
             "project_id": self.project_id,
             "canonical_sentinel": self.canonical_sentinel,
+            "rewrite_home": self.rewrite_home,
             "participants": [p.to_dict() for p in self.participants],
         }
 
@@ -95,6 +105,7 @@ class Roster:
         return cls(
             project_id=d["project_id"],
             canonical_sentinel=d.get("canonical_sentinel", DEFAULT_SENTINEL),
+            rewrite_home=d.get("rewrite_home", True),
             participants=[Participant.from_dict(p) for p in d.get("participants", [])],
         )
 

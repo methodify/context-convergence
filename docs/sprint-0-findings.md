@@ -90,16 +90,45 @@ reporting and human trust, not for targeting.
 
 ## Known v1 limitations (carry forward)
 
-1. **Home-path references are flagged, not rewritten** — including
-   `~/.claude/projects/<encoded-dir>/…` self-references (2,258 in deepdrift).
-   On machine B these point at machine A's encoded dir and are stale. Rewriting
-   the home/`.claude` surface is a deliberate future scope decision (design open
-   question #2).
-2. **Sibling roots** (Finding 2) remain machine-specific in canonical form.
-3. **Unparseable JSONL lines** pass through untouched (0 seen in practice;
+1. ~~Home-path references are flagged, not rewritten~~ — **CLOSED** (see Addendum).
+2. **Unparseable JSONL lines** pass through untouched (0 seen in practice;
    `doctor` would surface them).
 
 ## Verdict
 
 The bet behind the product holds. Proceed to Sprint 1 (single-machine roundtrip:
 `init`/`push`/`pull`, roster of one, local cluster dir) on this canonicalizer.
+
+---
+
+## Addendum (2026-06-14) — home-path gap closed (three-tier rewriting)
+
+Project-root-only rewriting left every home-anchored reference machine-specific.
+We categorized them across the three corpora and found nearly all are just
+`<home>` + a relative path. Decision: rewrite three tiers as a cluster-wide
+policy (`roster.rewrite_home`, default on; `init --no-rewrite-home` to opt out),
+applied longest-anchor-first:
+
+1. project root → `{{CC_PROJECT_ROOT}}`
+2. `<home>/.claude/projects/<encoded>` → `{{CC_PROJECT_CONTEXT_DIR}}` — its own
+   sentinel because BOTH the home prefix and the lossy encoded segment change
+   per machine; localize recomputes B's encoded dir from B's root.
+3. `<home>` → `{{CC_HOME}}` — covers `~/.claude/*`, dotfiles, and sibling
+   projects by the `~/src/{project}` convention.
+
+**The unlock — rewrite dict KEYS, not just values.** First measurement still
+showed thousands of home residues. Cause: tool results keep path-keyed maps
+(snapshot `trackedFileBackups` keyed by absolute file path), and the string-leaf
+walk only touched values, never keys. Transforming keys too dropped catalog's
+home residue **9,144 → 0** and convergence's **73 → 0**.
+
+**Residual (lossless, advisory in doctor):** deepdrift keeps 77 — all a single
+*malformed doubled-home* path `/Users/b/Users/b/src/dd-crossover`. The second
+home is preceded by an alphanumeric, so the leading boundary guard declines it —
+the same guard that correctly protects real nested paths (macOS firmlink
+`/System/Volumes/Data/Users/…`). Round-trips losslessly, so doctor reports home
+residue as advisory, not a failure.
+
+Real-data cross-machine check (catalog as machine A → Linux machine B): canonical
+form fully machine-neutral; B's output carries B's root, B's context dir (B's
+encoded segment), and B's home throughout, with zero machine-A paths.

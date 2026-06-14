@@ -21,12 +21,13 @@ import sys
 
 from . import engine, hooks
 from .doctor import format_report, scan
-from .pathmap import DEFAULT_SENTINEL, canonicalize_jsonl, localize_jsonl
+from .pathmap import DEFAULT_SENTINEL, canonicalize_jsonl_root, localize_jsonl_root
 
 
 def _cmd_init(args) -> int:
     r = engine.init(args.project_root, cluster_root=args.cluster,
-                    project_id=args.project_id, remote=args.remote)
+                    project_id=args.project_id, remote=args.remote,
+                    rewrite_home=not args.no_rewrite_home)
     print(f"init '{r['project_id']}' (machine {r['machine_id']}): "
           f"{r['files']} file(s), {r['substitutions']} path(s) canonicalized")
     print(f"  cluster: {r['cluster']}" + (f"  (remote {r['remote']})" if r["remote"] else ""))
@@ -131,7 +132,8 @@ def _cmd_status(args) -> int:
 
 
 def _cmd_doctor(args) -> int:
-    rep = scan(args.context_dir, root=args.root, home=args.home, sentinel=args.sentinel)
+    rep = scan(args.context_dir, root=args.root, home=args.home,
+               rewrite_home=not args.no_rewrite_home)
     print(format_report(rep))
     return 0 if rep.ok else 1
 
@@ -162,7 +164,7 @@ def _cmd_canonicalize(args) -> int:
     if not root:
         print("error: could not infer project root; pass --root", file=sys.stderr)
         return 2
-    n = _transform_dir(args.context_dir, args.out_dir, canonicalize_jsonl, root, args.sentinel)
+    n = _transform_dir(args.context_dir, args.out_dir, canonicalize_jsonl_root, root, args.sentinel)
     print(f"canonicalized {root} -> {args.sentinel}: {n} substitution(s) into {args.out_dir}")
     return 0
 
@@ -172,7 +174,7 @@ def _cmd_localize(args) -> int:
         print("error: localize requires --root (the target machine's project root)",
               file=sys.stderr)
         return 2
-    n = _transform_dir(args.in_dir, args.context_dir, localize_jsonl, args.root, args.sentinel)
+    n = _transform_dir(args.in_dir, args.context_dir, localize_jsonl_root, args.root, args.sentinel)
     print(f"localized {args.sentinel} -> {args.root}: {n} substitution(s) into {args.context_dir}")
     return 0
 
@@ -187,6 +189,8 @@ def main(argv=None) -> int:
     i.add_argument("--cluster", required=True)
     i.add_argument("--remote", default=None, help="git remote URL/path (omit for a local cluster dir)")
     i.add_argument("--project-id", default=None)
+    i.add_argument("--no-rewrite-home", action="store_true",
+                   help="rewrite project root + context dir only; leave the home prefix as-is")
     i.set_defaults(func=_cmd_init)
 
     j = sub.add_parser("join", help="pull a project's context onto a new machine, localized")
@@ -228,6 +232,7 @@ def main(argv=None) -> int:
     d.add_argument("context_dir")
     d.add_argument("--root", default=None)
     d.add_argument("--home", default=None)
+    d.add_argument("--no-rewrite-home", action="store_true")
     d.set_defaults(func=_cmd_doctor)
 
     c = sub.add_parser("canonicalize", help="local form -> canonical form")

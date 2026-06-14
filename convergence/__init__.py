@@ -10,6 +10,7 @@ sync machinery. Stdlib only. See docs/context-convergence-design.md.
 
 from .pathmap import (
     DEFAULT_SENTINEL,
+    build_mappings,
     canonicalize_jsonl,
     canonicalize_value,
     encode_project_dir,
@@ -23,6 +24,7 @@ __all__ = [
     "DEFAULT_SENTINEL",
     "Participant",
     "Roster",
+    "build_mappings",
     "canonicalize_jsonl",
     "canonicalize_value",
     "encode_project_dir",

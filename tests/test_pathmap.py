@@ -21,13 +21,19 @@ import unittest
 
 from convergence.pathmap import (
     DEFAULT_SENTINEL,
-    canonicalize_jsonl,
-    canonicalize_value,
+    SENTINEL_CONTEXT_DIR,
+    SENTINEL_HOME,
+    SENTINEL_PROJECT_ROOT,
+    build_mappings,
+    canonicalize_jsonl_root as canonicalize_jsonl,
+    canonicalize_value_root as canonicalize_value,
     encode_project_dir,
     infer_project_root,
-    localize_jsonl,
-    localize_value,
+    localize_jsonl_root as localize_jsonl,
+    localize_value_root as localize_value,
 )
+from convergence.pathmap import canonicalize_jsonl as canonicalize_jsonl_m
+from convergence.pathmap import localize_jsonl as localize_jsonl_m
 from convergence.roster import Participant
 
 # Known (real_root -> encoded_dir) pairs captured from this machine on 2026-06-13.
@@ -287,6 +293,89 @@ class TestRealCorpus(unittest.TestCase):
             self.assertNotIn(self.ROOT, canon, f"root residue in {f}")
             self.assertEqual(localize_jsonl(canon, self.ROOT)[0], original,
                              f"round-trip changed {f}")
+
+
+class TestTieredMappings(unittest.TestCase):
+    """The home-path gap closed: project root + own context dir + home prefix."""
+
+    A_HOME, A_ROOT = "/Users/alice", "/Users/alice/src/demo"
+    B_HOME, B_ROOT = "/home/bob", "/home/bob/work/demo"
+
+    def _maps(self, home, root, rewrite_home=True):
+        return build_mappings(home, root, encode_project_dir(root), rewrite_home)
+
+    def _doc(self, home, root):
+        enc = encode_project_dir(root)
+        return json.dumps({
+            "root": f"{root}/a.py",
+            "ctx": f"{home}/.claude/projects/{enc}/x.jsonl",
+            "dot": f"{home}/.cargo/bin/cargo",
+            "sib": f"{home}/src/other-project/y.py",
+            "plain": f"running in {root}.",  # trailing-period punctuation
+        }, separators=(",", ":")) + "\n"
+
+    def test_mapping_order_is_longest_anchor_first(self):
+        anchors = [a for a, _ in self._maps(self.A_HOME, self.A_ROOT)]
+        self.assertEqual(anchors, sorted(anchors, key=len, reverse=True))
+
+    def test_all_three_tiers_rewrite_and_roundtrip(self):
+        doc = self._doc(self.A_HOME, self.A_ROOT)
+        maps = self._maps(self.A_HOME, self.A_ROOT)
+        canon, _ = canonicalize_jsonl_m(doc, maps)
+        self.assertNotIn(self.A_ROOT, canon)
+        self.assertNotIn(self.A_HOME, canon)        # nothing machine-specific leaks
+        for sent in (SENTINEL_PROJECT_ROOT, SENTINEL_CONTEXT_DIR, SENTINEL_HOME):
+            self.assertIn(sent, canon)
+        self.assertEqual(localize_jsonl_m(canon, maps)[0], doc)
+
+    def test_cross_machine_all_tiers(self):
+        a_doc = self._doc(self.A_HOME, self.A_ROOT)
+        canon, _ = canonicalize_jsonl_m(a_doc, self._maps(self.A_HOME, self.A_ROOT))
+        b_text, _ = localize_jsonl_m(canon, self._maps(self.B_HOME, self.B_ROOT))
+        b_enc = encode_project_dir(self.B_ROOT)
+        self.assertIn(f"{self.B_ROOT}/a.py", b_text)
+        # context dir expands to B's home AND B's (different, lossy) encoded dir:
+        self.assertIn(f"{self.B_HOME}/.claude/projects/{b_enc}/x.jsonl", b_text)
+        self.assertIn(f"{self.B_HOME}/.cargo/bin/cargo", b_text)
+        self.assertIn(f"{self.B_HOME}/src/other-project/y.py", b_text)
+        self.assertNotIn(self.A_HOME, b_text)
+        # canonical form is identical regardless of which machine produced it:
+        b_doc = self._doc(self.B_HOME, self.B_ROOT)
+        canon_b, _ = canonicalize_jsonl_m(b_doc, self._maps(self.B_HOME, self.B_ROOT))
+        self.assertEqual(canon, canon_b)
+
+    def test_context_dir_beats_home_tier(self):
+        # The context-dir path must not be half-eaten by the shorter home anchor.
+        enc = encode_project_dir(self.A_ROOT)
+        doc = json.dumps({"p": f"{self.A_HOME}/.claude/projects/{enc}/m.jsonl"},
+                         separators=(",", ":")) + "\n"
+        canon, _ = canonicalize_jsonl_m(doc, self._maps(self.A_HOME, self.A_ROOT))
+        self.assertIn(f"{SENTINEL_CONTEXT_DIR}/m.jsonl", canon)
+        self.assertNotIn(SENTINEL_HOME, canon)
+
+    def test_path_keyed_dicts_are_rewritten(self):
+        # Tool results keep maps keyed by absolute path (e.g. trackedFileBackups);
+        # the KEYS are as machine-specific as values and must rewrite + round-trip.
+        doc = json.dumps({"snapshot": {"trackedFileBackups": {
+            f"{self.A_ROOT}/a.py": {"checksum": "x"},
+            f"{self.A_HOME}/.config/app.ini": {"checksum": "y"},
+        }}}, separators=(",", ":")) + "\n"
+        maps = self._maps(self.A_HOME, self.A_ROOT)
+        canon, _ = canonicalize_jsonl_m(doc, maps)
+        self.assertNotIn(self.A_HOME, canon)        # keys rewritten too
+        self.assertIn(SENTINEL_PROJECT_ROOT, canon)
+        self.assertIn(SENTINEL_HOME, canon)
+        self.assertEqual(localize_jsonl_m(canon, maps)[0], doc)  # round-trips
+
+    def test_rewrite_home_off_keeps_home_but_rewrites_context_dir(self):
+        doc = self._doc(self.A_HOME, self.A_ROOT)
+        maps = self._maps(self.A_HOME, self.A_ROOT, rewrite_home=False)
+        canon, _ = canonicalize_jsonl_m(doc, maps)
+        self.assertIn(SENTINEL_PROJECT_ROOT, canon)
+        self.assertIn(SENTINEL_CONTEXT_DIR, canon)       # context dir still exact
+        self.assertNotIn(SENTINEL_HOME, canon)
+        self.assertIn(f"{self.A_HOME}/.cargo/bin/cargo", canon)  # home left as-is
+        self.assertEqual(localize_jsonl_m(canon, maps)[0], doc)
 
 
 if __name__ == "__main__":
