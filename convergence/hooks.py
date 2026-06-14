@@ -37,6 +37,8 @@ def hook_sync(project_root: str | None = None) -> int:
     try:
         result = engine.sync(project_root=root)
         _log(f"sync {result['project_id']}: pulled {result['pulled']}, pushed {result['pushed']}")
+    except engine.LockBusy:
+        _log("sync skipped: another convergence run holds the lock")
     except engine.ConvergenceError:
         pass  # not a convergence project (the common case) — stay silent
     except Exception:  # noqa: BLE001 — a hook must never break the session

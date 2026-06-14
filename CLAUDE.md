@@ -54,7 +54,7 @@ Real context dirs live at `~/.claude/projects/<encoded-dir>/`. `doctor` on this 
 
 ### Module map
 
-`pathmap.py` (path-mapping core, no I/O) · `roster.py` (`Participant`/`Roster` + persistence) · `cluster.py` (`Cluster` = one project's tree: `roster.json` + `context/`) · `config.py` (machine-level default remote) · `localstate.py` (per-machine project marker → its clone, remote, branch) · `env.py` (location/clock/machine-id/os/settings/`clone_dir` resolution, all env-overridable) · `gitutil.py` (branch-aware git wrappers: orphan branches, single-branch clone, `ls-remote`) · `transport.py` (`LocalTransport`/`GitTransport` + `project_branch` + `union_jsonl`) · `secrets.py` (curated secret patterns) · `hooks.py` (Stop-hook install + soft-failing `hook_sync`) · `engine.py` (the verbs + `list_projects`; fail-loud round-trip guard on push, backup-before-overwrite on pull, publish-retry, opt-in secret scan) · `doctor.py` (honesty scan) · `__main__.py` (CLI).
+`pathmap.py` (path-mapping core, no I/O) · `roster.py` (`Participant`/`Roster` + persistence) · `cluster.py` (`Cluster` = one project's tree: `roster.json` + `context/`) · `config.py` (machine-level default remote) · `errors.py` (`ConvergenceError`/`LockBusy`) · `lock.py` (per-project flock) · `localstate.py` (per-machine project marker → its clone, remote, branch) · `env.py` (location/clock/machine-id/os/settings/`clone_dir` resolution, all env-overridable) · `gitutil.py` (branch-aware git wrappers: orphan branches, single-branch clone, `ls-remote`) · `transport.py` (`LocalTransport`/`GitTransport` + `project_branch` + `union_jsonl`) · `secrets.py` (curated secret patterns) · `hooks.py` (Stop-hook install + soft-failing `hook_sync`) · `engine.py` (the verbs + `list_projects`; fail-loud round-trip guard on push, backup-before-overwrite on pull, publish-retry, opt-in secret scan) · `doctor.py` (honesty scan) · `__main__.py` (CLI).
 
 The push guard compares against `normalize_jsonl(text)` (compact re-serialization), not raw bytes — it verifies *data* reversibility, not incidental whitespace. Tests are sandboxed via the `env.py` overrides; `CLAUDE_SETTINGS_PATH` redirects hook install away from the real settings.json.
 
@@ -100,9 +100,10 @@ The protections that keep `~/.claude/projects/` safe — do not weaken these:
 - **Backup before overwrite.** pull/join copy every synced file (byte-exact) to `~/.convergence/backups/<encoded>/<ts>/` *before* writing; if backup throws, the run aborts before any overwrite.
 - **Atomic writes.** Local writes go through `_atomic_write` (temp in same dir + `os.replace`) — a crash mid-write leaves the existing file intact, never truncated.
 - **`sync` is push-THEN-pull.** Push first so this machine's local-ahead content (memory edited in place, a continued transcript) is union-merged into the cluster *before* pull overwrites the local dir. Pull-first would clobber unpushed local work (recoverable only from backup). Don't reorder.
+- **Per-project lock** (`lock.project_lock`, an `flock` on `~/.convergence/locks/<id>.lock`). init/join/push/pull/sync/status acquire it non-blocking; a second concurrent run raises `LockBusy` (the Stop hook logs-and-skips, a manual command tells the user to retry). Re-entrant within a process (sync holds it across push+pull). flock auto-releases on process exit, so no stale locks.
 - **Round-trip guard on push** refuses any file that doesn't reverse losslessly.
 
-Known lower-priority gaps (not yet hardened): no concurrency lock (Stop-hook sync + manual sync can interleave); reads use `errors="replace"` (lossy on non-UTF-8, can't be caught by the guard); backups aren't pruned and same-second backups share a dir. Memory files are cross-machine LWW (local-wins on push; git history backstops).
+Known lower-priority gaps (not yet hardened): reads use `errors="replace"` (lossy on non-UTF-8, can't be caught by the guard); backups aren't pruned and same-second backups share a dir. Memory files are cross-machine LWW (local-wins on push; git history backstops).
 
 ## Working with real context data
 

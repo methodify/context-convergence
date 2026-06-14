@@ -21,7 +21,9 @@ import shutil
 import tempfile
 
 from . import env, gitutil, secrets
+from .errors import ConvergenceError, LockBusy  # noqa: F401 (re-exported)
 from .localstate import LocalState
+from .lock import project_lock
 from .pathmap import (
     canonicalize_jsonl,
     canonicalize_value,
@@ -34,10 +36,6 @@ from .roster import Participant, Roster
 from .transport import PushRejected, open_transport, project_branch, union_jsonl
 
 _PUBLISH_ATTEMPTS = 5
-
-
-class ConvergenceError(Exception):
-    """A user-facing failure (fail loud, never guess)."""
 
 
 # --------------------------------------------------------------------------- #
@@ -228,6 +226,11 @@ def init(project_root, remote=None, cluster=None, project_id=None, rewrite_home=
             f"no Claude Code context found for {root}\n"
             f"  expected: {_local_context_dir(encoded)}/*.jsonl")
     pid = project_id or os.path.basename(root)
+    with project_lock(pid):
+        return _init(root, encoded, pid, remote, cluster, rewrite_home)
+
+
+def _init(root, encoded, pid, remote, cluster, rewrite_home) -> dict:
     transport = open_transport(pid, remote, cluster)
     if transport.exists():
         raise ConvergenceError(
@@ -257,6 +260,11 @@ def join(project_root, remote=None, cluster=None, project_id=None) -> dict:
     root = _abs_root(project_root)
     encoded = encode_project_dir(root)
     pid = project_id or os.path.basename(root)
+    with project_lock(pid):
+        return _join(root, encoded, pid, remote, cluster)
+
+
+def _join(root, encoded, pid, remote, cluster) -> dict:
     transport = open_transport(pid, remote, cluster)
     if not transport.exists():
         raise ConvergenceError(
@@ -292,6 +300,11 @@ def join(project_root, remote=None, cluster=None, project_id=None) -> dict:
 # --------------------------------------------------------------------------- #
 def push(project_root=None, project_id=None, scan_secrets=False, strict_secrets=False) -> dict:
     st = _resolve_state(project_root, project_id)
+    with project_lock(st.project_id):
+        return _push(st, scan_secrets, strict_secrets)
+
+
+def _push(st, scan_secrets=False, strict_secrets=False) -> dict:
     warnings = _scan_files(st.encoded_dir) if scan_secrets else {}
     if warnings and strict_secrets:
         n = sum(len(v) for v in warnings.values())
@@ -329,6 +342,11 @@ def push(project_root=None, project_id=None, scan_secrets=False, strict_secrets=
 # --------------------------------------------------------------------------- #
 def pull(project_root=None, project_id=None) -> dict:
     st = _resolve_state(project_root, project_id)
+    with project_lock(st.project_id):
+        return _pull(st)
+
+
+def _pull(st) -> dict:
     transport = open_transport(st.project_id, st.remote, st.cluster_root)
     transport.ensure()
     transport.sync_down()
@@ -352,9 +370,12 @@ def sync(project_root=None, project_id=None) -> dict:
     """Push THEN pull. Push first so this machine's local-ahead content (memory
     edited in place, a transcript continued since last push) is union-merged into
     the cluster before pull overwrites the local dir — otherwise a pull-first
-    sync would clobber unpushed local work (recoverable only from backup)."""
-    ph = push(project_root, project_id)
-    pl = pull(project_root, project_id)
+    sync would clobber unpushed local work (recoverable only from backup). The
+    lock is held across both halves so nothing interleaves between them."""
+    st = _resolve_state(project_root, project_id)
+    with project_lock(st.project_id):
+        ph = _push(st)
+        pl = _pull(st)
     return {"project_id": ph["project_id"], "pulled": pl["files"],
             "pushed": ph["files"], "backup": pl["backup"]}
 
@@ -388,6 +409,11 @@ def list_projects(remote: str) -> list[str]:
 
 def status(project_root=None, project_id=None) -> dict:
     st = _resolve_state(project_root, project_id)
+    with project_lock(st.project_id):
+        return _status(st)
+
+
+def _status(st) -> dict:
     transport = open_transport(st.project_id, st.remote, st.cluster_root)
     transport.ensure()
     transport.sync_down()  # reflect the branch's latest in "behind"
