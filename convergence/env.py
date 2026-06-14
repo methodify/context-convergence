@@ -33,6 +33,16 @@ def convergence_home() -> str:
     )
 
 
+def claude_settings_path() -> str:
+    return os.environ.get(
+        "CLAUDE_SETTINGS_PATH", os.path.expanduser("~/.claude/settings.json")
+    )
+
+
+def hook_log_path() -> str:
+    return os.path.join(convergence_home(), "hook.log")
+
+
 def home_dir() -> str:
     return os.path.expanduser("~")
 

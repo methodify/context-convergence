@@ -194,6 +194,16 @@ def localize_jsonl(
     return _transform_jsonl(text, lambda s: localize_value(s, root, sentinel))
 
 
+def normalize_jsonl(text: str) -> str:
+    """Re-serialize every JSON line compactly without touching any string value.
+
+    This is the formatting normalization canonicalize/localize apply incidentally
+    (parse + compact dump). Used by the push guard to check *data* reversibility
+    rather than byte-identity of incidental formatting — real Claude Code lines
+    are already compact, so for them normalize is the identity."""
+    return _transform_jsonl(text, lambda s: (s, 0))[0]
+
+
 # --------------------------------------------------------------------------- #
 # Root inference
 # --------------------------------------------------------------------------- #

@@ -19,7 +19,7 @@ import glob
 import os
 import sys
 
-from . import engine
+from . import engine, hooks
 from .doctor import format_report, scan
 from .pathmap import DEFAULT_SENTINEL, canonicalize_jsonl, localize_jsonl
 
@@ -52,10 +52,57 @@ def _cmd_join(args) -> int:
     return 0
 
 
+def _print_secret_warnings(warnings) -> None:
+    if not warnings:
+        return
+    n = sum(len(v) for v in warnings.values())
+    print(f"  ⚠ {n} apparent secret(s) in pushed context:", file=sys.stderr)
+    for name, findings in warnings.items():
+        for f in findings:
+            print(f"      {name}: {f}", file=sys.stderr)
+
+
 def _cmd_push(args) -> int:
-    r = engine.push(args.project_root, project_id=args.project_id)
+    r = engine.push(args.project_root, project_id=args.project_id,
+                    scan_secrets=args.scan_secrets, strict_secrets=args.strict)
     print(f"push '{r['project_id']}': {r['files']} file(s), "
           f"{r['substitutions']} path(s) canonicalized -> {r['cluster']}")
+    _print_secret_warnings(r.get("secret_warnings"))
+    return 0
+
+
+def _cmd_scan(args) -> int:
+    warnings = engine.scan_local(args.project_root, project_id=args.project_id)
+    if not warnings:
+        print("scan: no apparent secrets found")
+        return 0
+    n = sum(len(v) for v in warnings.values())
+    print(f"scan: {n} apparent secret(s) across {len(warnings)} file(s):")
+    for name, findings in warnings.items():
+        for f in findings:
+            print(f"  {name}: {f}")
+    return 1
+
+
+def _cmd_hook_sync(args) -> int:
+    return hooks.hook_sync(args.project_root)
+
+
+def _cmd_hook(args) -> int:
+    if args.action == "install":
+        r = hooks.install(event=args.event, settings_path=args.settings)
+        print(("installed" if r["changed"] else "already installed")
+              + f" {r['event']} hook in {r['settings']}")
+        print(f"  command: {r['command']}")
+    elif args.action == "uninstall":
+        r = hooks.uninstall(event=args.event, settings_path=args.settings)
+        print(f"removed {r['removed']} {r['event']} hook entr(ies) from {r['settings']}")
+    else:  # status
+        r = hooks.status(settings_path=args.settings)
+        print(f"hook settings: {r['settings']}")
+        for ev, on in r["installed"].items():
+            print(f"  {ev}: {'installed' if on else 'not installed'}")
+        print(f"  command: {r['command']}")
     return 0
 
 
@@ -149,16 +196,33 @@ def main(argv=None) -> int:
     j.add_argument("--project-id", default=None)
     j.set_defaults(func=_cmd_join)
 
+    pushp = sub.add_parser("push", help="localize->canonicalize local context into the cluster")
+    pushp.add_argument("project_root", nargs="?", default=None)
+    pushp.add_argument("--project-id", default=None)
+    pushp.add_argument("--scan-secrets", action="store_true", help="scan for apparent secrets first")
+    pushp.add_argument("--strict", action="store_true", help="with --scan-secrets, refuse on any finding")
+    pushp.set_defaults(func=_cmd_push)
+
     for name, fn, help_ in (
-        ("push", _cmd_push, "localize->canonicalize local context into the cluster"),
         ("pull", _cmd_pull, "localize cluster context into ~/.claude/projects"),
         ("sync", _cmd_sync, "pull then push (the everyday verb)"),
         ("status", _cmd_status, "show dirty/behind state and roster"),
+        ("scan", _cmd_scan, "scan local context for apparent secrets (no sync)"),
     ):
         sp = sub.add_parser(name, help=help_)
         sp.add_argument("project_root", nargs="?", default=None)
         sp.add_argument("--project-id", default=None)
         sp.set_defaults(func=fn)
+
+    hs = sub.add_parser("hook-sync", help="(internal) soft-failing sync for the Stop hook")
+    hs.add_argument("project_root", nargs="?", default=None)
+    hs.set_defaults(func=_cmd_hook_sync)
+
+    hk = sub.add_parser("hook", help="install/uninstall the Stop-hook that runs sync at session end")
+    hk.add_argument("action", choices=["install", "uninstall", "status"])
+    hk.add_argument("--event", default=hooks.DEFAULT_EVENT, choices=["Stop", "SessionEnd"])
+    hk.add_argument("--settings", default=None, help="settings.json path (default ~/.claude/settings.json)")
+    hk.set_defaults(func=_cmd_hook)
 
     d = sub.add_parser("doctor", help="scan a context dir and report safety")
     d.add_argument("context_dir")

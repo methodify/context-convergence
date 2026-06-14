@@ -17,9 +17,9 @@ import glob
 import os
 import shutil
 
-from . import env, gitutil
+from . import env, gitutil, secrets
 from .localstate import LocalState
-from .pathmap import encode_project_dir
+from .pathmap import encode_project_dir, normalize_jsonl
 from .roster import Participant, Roster
 from .transport import PushRejected, open_transport, union_jsonl
 
@@ -72,8 +72,14 @@ def _resolve_state(project_root: str | None, project_id: str | None) -> LocalSta
 
 
 def _guarded_canonicalize(participant: Participant, text: str, sentinel: str) -> str:
+    """Canonicalize, verifying the PATH rewriting reverses without data loss.
+
+    Compared against the normalized (compact-reserialized) form, not the raw
+    bytes: canonicalize/localize re-serialize JSON compactly, which for real
+    Claude Code lines is a no-op but would otherwise make incidental formatting
+    look like a round-trip failure. We guard data, not whitespace."""
     canon, _ = participant.canonicalize(text, sentinel)
-    if participant.localize(canon, sentinel)[0] != text:
+    if participant.localize(canon, sentinel)[0] != normalize_jsonl(text):
         raise ConvergenceError(
             "refusing to push: a transcript did not round-trip losslessly "
             "(run `doctor` to inspect). No data was written.")
@@ -213,10 +219,35 @@ def join(project_root, cluster_root, project_id=None, remote=None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# secret scan (design §6.5)
+# --------------------------------------------------------------------------- #
+def _scan_files(encoded_dir: str) -> dict:
+    out = {}
+    for f in _local_context_files(encoded_dir):
+        findings = secrets.scan_text(_read(f))
+        if findings:
+            out[os.path.basename(f)] = findings
+    return out
+
+
+def scan_local(project_root=None, project_id=None) -> dict:
+    """Scan this project's local context for apparent secrets (no sync)."""
+    st = _resolve_state(project_root, project_id)
+    return _scan_files(st.encoded_dir)
+
+
+# --------------------------------------------------------------------------- #
 # push
 # --------------------------------------------------------------------------- #
-def push(project_root=None, project_id=None) -> dict:
+def push(project_root=None, project_id=None, scan_secrets=False, strict_secrets=False) -> dict:
     st = _resolve_state(project_root, project_id)
+    warnings = _scan_files(st.encoded_dir) if scan_secrets else {}
+    if warnings and strict_secrets:
+        n = sum(len(v) for v in warnings.values())
+        raise ConvergenceError(
+            f"refusing to push: {n} apparent secret(s) found across "
+            f"{len(warnings)} file(s) — run `convergence scan`, or push without --strict. "
+            f"Nothing was written.")
     transport = open_transport(st.cluster_root, st.remote)
     now = env.now_iso()
     out = {}
@@ -240,7 +271,7 @@ def push(project_root=None, project_id=None) -> dict:
     st.last_converged_commit = gitutil.current_commit(transport.cluster.root)
     st.save()
     return {"project_id": st.project_id, "files": out["files"], "substitutions": out["subs"],
-            "cluster": transport.cluster.root}
+            "cluster": transport.cluster.root, "secret_warnings": warnings}
 
 
 # --------------------------------------------------------------------------- #

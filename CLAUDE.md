@@ -4,19 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**Sprints 0–3 are complete** (2026-06-13), all stdlib Python, 44 tests green.
+**Sprints 0–4 are complete** (2026-06-13/14), all stdlib Python, 58 tests green.
 - **Sprint 0** — canonicalize/localize core + `doctor`. Idempotency invariant proven against real transcripts (242 / 105,623 / 42,714 records — all round-trip losslessly). See `docs/sprint-0-findings.md` for what the dogfooding overturned.
 - **Sprint 1** — single-machine roundtrip: `init`/`push`/`pull`/`status` against a local cluster dir, real `roster.json`, roster of one. Byte-identical roundtrip proven on this project's own context.
 - **Sprint 2** — second machine: `join`, multi-participant roster, localize-on-checkout. Headline loop verified — context authored on machine B reaches machine A localized to A's paths, cluster staying machine-neutral.
 - **Sprint 3** — git transport: `--remote` makes the cluster a working clone of a private git repo; `sync` = pull then push. Verified over a hermetic bare repo: init→join→sync loop, disjoint-session union across machines, accumulating git history.
+- **Sprint 4** — seamless layer + safety: the blessed Stop-hook (`hook install` wires a global Claude Code Stop hook running `hook-sync`, which resolves the project from cwd and syncs, failing soft so it can never break a session) and the opt-in secret scan (`scan`, `push --scan-secrets [--strict]`, design §6.5).
 
-`docs/context-convergence-design.md` remains the product source of truth. **Next: Sprint 4** — seamless layer (Stop-hook `sync`, `status` polish, secret-scan flag) and hardening.
+`docs/context-convergence-design.md` remains the product source of truth. The v1 build order is essentially done; **remaining** is optional Sprint 5 (background watcher mode) and the known v1 gaps in `docs/sprint-0-findings.md` (chiefly: `~/.claude/projects/<encoded>/…` home-path self-references aren't rewritten, so they go stale on another machine).
 
 ### Transport model (Sprint 3)
 
 git is **pure transport + history**; all merging happens in canonical space via `transport.union_jsonl`, so the local clone is a cache of the remote and git-level conflicts never arise. Each publishing op (`init`/`join`/`push`) runs `sync_down` (fetch + `reset --hard origin/main`) → re-derives canonical state from local truth, unioned with the remote's latest → commit → push, retrying the whole thing if the push is non-fast-forward. The everyday merge is append-mostly union: disjoint sessions union; a session extended on two machines keeps both sides' records rather than dropping either. Without `--remote`, `open_transport` returns a no-op `LocalTransport` and the cluster dir is the cluster (Sprint 1/2).
 
-**Language: Python** (stdlib only). The *ship*-language is still open (Rust is a candidate); the spike code is not automatically the product. Keep the property tests as the portable spec.
+**Language: Python, stdlib-only — locked in** (2026-06-13). The ship-language question is closed; Rust was ruled out. Don't add third-party deps (tests use `unittest`). Keep the property tests as the correctness spec.
 
 ### Commands
 
@@ -30,6 +31,9 @@ python3 -m unittest tests.test_engine              # one module
 python3 -m convergence init <project_root> --cluster <clone_dir> [--remote URL] [--project-id ID]
 python3 -m convergence join <project_root> --cluster <clone_dir> [--remote URL] [--project-id ID]
 python3 -m convergence push|pull|sync|status [project_root] [--project-id ID]
+python3 -m convergence push <project_root> --scan-secrets [--strict]   # opt-in secret scan
+python3 -m convergence scan [project_root]                             # secret scan, no sync
+python3 -m convergence hook install|uninstall|status [--event Stop|SessionEnd]
 
 # low-level path mapping (Sprint 0)
 python3 -m convergence doctor <context_dir>        # scan + safety report (infers root)
@@ -41,7 +45,9 @@ Real context dirs live at `~/.claude/projects/<encoded-dir>/`. `doctor` on this 
 
 ### Module map
 
-`pathmap.py` (path-mapping core, no I/O) · `roster.py` (`Participant`/`Roster` + persistence) · `cluster.py` (`Cluster` filesystem layout, §3.4) · `localstate.py` (per-machine project marker, §3.5) · `env.py` (location/clock/machine-id/os resolution, all env-overridable) · `gitutil.py` (thin checked git wrappers) · `transport.py` (`LocalTransport`/`GitTransport` + `union_jsonl`) · `engine.py` (the `init`/`join`/`push`/`pull`/`sync`/`status` verbs; fail-loud round-trip guard on push, backup-before-overwrite on pull, publish-retry) · `doctor.py` (honesty scan) · `__main__.py` (CLI).
+`pathmap.py` (path-mapping core, no I/O) · `roster.py` (`Participant`/`Roster` + persistence) · `cluster.py` (`Cluster` filesystem layout, §3.4) · `localstate.py` (per-machine project marker, §3.5) · `env.py` (location/clock/machine-id/os/settings resolution, all env-overridable) · `gitutil.py` (thin checked git wrappers) · `transport.py` (`LocalTransport`/`GitTransport` + `union_jsonl`) · `secrets.py` (curated secret patterns) · `hooks.py` (Stop-hook install + soft-failing `hook_sync`) · `engine.py` (the verbs; fail-loud round-trip guard on push, backup-before-overwrite on pull, publish-retry, opt-in secret scan) · `doctor.py` (honesty scan) · `__main__.py` (CLI).
+
+The push guard compares against `normalize_jsonl(text)` (compact re-serialization), not raw bytes — it verifies *data* reversibility, not incidental whitespace. Tests are sandboxed via the `env.py` overrides; `CLAUDE_SETTINGS_PATH` redirects hook install away from the real settings.json.
 
 ## What this tool is
 
@@ -109,7 +115,6 @@ Sync strategy is **git + append-mostly union + last-writer-wins-with-backup**, n
 ## Undecided (don't silently resolve these)
 
 These are open questions from the design — surface them rather than picking for the user:
-- **Ship-language** — Sprint 0 spike is Python (decided); the language for the *shipped* tool (Python vs. Rust) is still open, decide after the canonicalizer's shape is known.
 - **`project_id` derivation** — manual vs. seeded from the git remote URL (the join key must be stable and machine-neutral).
 - **Home-dir refs outside project root** — flag-only (v1 rec) vs. rewrite.
 - **Scope** — sync `~/.claude/projects/` only, or also opt-in repo-local `.mcc/` state (v1 rec: context dir only).
