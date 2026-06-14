@@ -8,6 +8,11 @@ repo and **deep-rewrites machine-local paths** on checkout, so a transcript made
 on `/home/you/src/proj` resolves correctly when you pull it onto
 `/Users/you/src/proj`.
 
+It syncs your session **transcripts** and your **`memory/`** (the persistent
+file memory — as core as the transcripts on modern Claude Code), path-rewriting
+both. Per-session tool-result/subagent subfolders are treated as ephemeral and
+left local for now.
+
 Stdlib-only Python, no runtime dependencies.
 
 ## Install

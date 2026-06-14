@@ -84,7 +84,7 @@ class MultiMachineTest(unittest.TestCase):
         self.assertNotIn("{{CC_PROJECT_ROOT}}", b_text)
 
         # Cluster stays machine-neutral; A's local form is untouched.
-        canon = _slurp(Cluster(self.cluster).context_files()[0])
+        canon = Cluster(self.cluster).read_context("sess.jsonl")
         self.assertNotIn(ROOT_A, canon)
         self.assertNotIn(ROOT_B, canon)
         self._use("A", "machine-A")

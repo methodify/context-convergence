@@ -66,16 +66,23 @@ class Cluster:
 
     # -- canonical context ------------------------------------------------ #
     def context_files(self) -> list[str]:
-        return sorted(glob.glob(os.path.join(self.context_dir, "*.jsonl")))
+        """Relative paths of every canonical file under context/ (recursively),
+        e.g. 'sess.jsonl' and 'memory/MEMORY.md'."""
+        out = []
+        for f in sorted(glob.glob(os.path.join(self.context_dir, "**", "*"), recursive=True)):
+            if os.path.isfile(f):
+                out.append(os.path.relpath(f, self.context_dir))
+        return out
 
-    def read_context(self, filename: str) -> str | None:
+    def read_context(self, relpath: str) -> str | None:
         try:
-            with open(os.path.join(self.context_dir, filename), encoding="utf-8", errors="replace") as fh:
+            with open(os.path.join(self.context_dir, relpath), encoding="utf-8", errors="replace") as fh:
                 return fh.read()
         except FileNotFoundError:
             return None
 
-    def write_context(self, filename: str, text: str) -> None:
-        os.makedirs(self.context_dir, exist_ok=True)
-        with open(os.path.join(self.context_dir, filename), "w", encoding="utf-8") as fh:
+    def write_context(self, relpath: str, text: str) -> None:
+        path = os.path.join(self.context_dir, relpath)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)

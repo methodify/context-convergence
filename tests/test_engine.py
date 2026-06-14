@@ -59,10 +59,15 @@ class EngineTest(unittest.TestCase):
         self.original = _jsonl(_record(ROOT), _record(ROOT))
         with open(os.path.join(self.ctx_dir, "sess.jsonl"), "w") as fh:
             fh.write(self.original)
-        # a sidecar that must NOT be synced in Sprint 1 (jsonl only)
+        # memory IS synced (markdown, path-rewritten like transcripts).
         os.makedirs(os.path.join(self.ctx_dir, "memory"))
+        self.memory = f"# notes\nsee {ROOT}/a.py and ~/elsewhere\n"
         with open(os.path.join(self.ctx_dir, "memory", "note.md"), "w") as fh:
-            fh.write("ignore me")
+            fh.write(self.memory)
+        # a session subfolder (tool results / subagents) that must NOT be synced.
+        os.makedirs(os.path.join(self.ctx_dir, "abc-123"))
+        with open(os.path.join(self.ctx_dir, "abc-123", "tool.txt"), "w") as fh:
+            fh.write("ephemeral")
 
     def tearDown(self):
         os.environ.clear()
@@ -73,15 +78,14 @@ class EngineTest(unittest.TestCase):
     def test_init_creates_cluster_roster_and_canonical_context(self):
         r = engine.init(ROOT, cluster=self.cluster_dir)
         self.assertEqual(r["project_id"], "demo")
-        self.assertEqual(r["files"], 1)
+        self.assertEqual(r["files"], 2)  # sess.jsonl + memory/note.md
         self.assertGreater(r["substitutions"], 0)
 
         cluster = Cluster(self.cluster_dir)
         self.assertTrue(cluster.has_roster())
-        canon = _slurp(cluster.context_files()[0])
+        canon = cluster.read_context("sess.jsonl")
         self.assertNotIn(ROOT, canon)               # canonicalized
         self.assertIn("{{CC_PROJECT_ROOT}}", canon)
-        self.assertIn("/Users/tester/.claude/projects/x", canon)  # home ref untouched
 
         roster = cluster.load_roster()
         self.assertEqual(len(roster.participants), 1)
@@ -93,10 +97,23 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(st.project_root, ROOT)
         self.assertEqual(st.cluster_root, os.path.abspath(self.cluster_dir))
 
-    def test_init_only_syncs_jsonl(self):
+    def test_init_syncs_jsonl_and_memory_but_not_session_subfolders(self):
         engine.init(ROOT, cluster=self.cluster_dir)
-        names = [os.path.basename(f) for f in Cluster(self.cluster_dir).context_files()]
-        self.assertEqual(names, ["sess.jsonl"])  # memory/note.md excluded
+        names = Cluster(self.cluster_dir).context_files()
+        self.assertEqual(names, ["memory/note.md", "sess.jsonl"])  # memory in
+        # the abc-123/ session subfolder is excluded as ephemeral.
+        self.assertNotIn("abc-123/tool.txt", names)
+        # memory is path-rewritten, not stored verbatim.
+        mem = Cluster(self.cluster_dir).read_context("memory/note.md")
+        self.assertNotIn(ROOT, mem)
+        self.assertIn("{{CC_PROJECT_ROOT}}", mem)
+
+    def test_memory_roundtrips_through_pull(self):
+        engine.init(ROOT, cluster=self.cluster_dir)
+        os.remove(os.path.join(self.ctx_dir, "memory", "note.md"))
+        engine.pull(project_id="demo")
+        restored = _slurp(os.path.join(self.ctx_dir, "memory", "note.md"))
+        self.assertEqual(restored, self.memory)  # byte-identical, localized to ROOT
 
     def test_init_refuses_without_context(self):
         with self.assertRaises(engine.ConvergenceError):
@@ -118,7 +135,7 @@ class EngineTest(unittest.TestCase):
         # Wipe local, then pull from cluster: single machine -> identity.
         os.remove(os.path.join(self.ctx_dir, "sess.jsonl"))
         r = engine.pull(project_id="demo")
-        self.assertEqual(r["files"], 1)
+        self.assertEqual(r["files"], 2)  # sess.jsonl + memory/note.md
         restored = _slurp(os.path.join(self.ctx_dir, "sess.jsonl"))
         self.assertEqual(restored, self.original)
 
@@ -135,7 +152,7 @@ class EngineTest(unittest.TestCase):
         with open(os.path.join(self.ctx_dir, "sess.jsonl"), "a") as fh:
             fh.write(_jsonl(_record(ROOT)))
         engine.push(project_root=ROOT)
-        canon = _slurp(Cluster(self.cluster_dir).context_files()[0])
+        canon = Cluster(self.cluster_dir).read_context("sess.jsonl")
         self.assertEqual(canon.count("\n"), 3)        # 2 original + 1 appended
         self.assertNotIn(ROOT, canon)
         # last_converged advanced on roster + local state.
@@ -147,7 +164,7 @@ class EngineTest(unittest.TestCase):
         s = engine.status(project_id="demo")
         self.assertEqual(s["dirty"], [])
         self.assertEqual(s["behind"], [])
-        self.assertEqual(s["local_count"], 1)
+        self.assertEqual(s["local_count"], 2)  # sess.jsonl + memory/note.md
         with open(os.path.join(self.ctx_dir, "new.jsonl"), "w") as fh:
             fh.write(_jsonl(_record(ROOT)))
         s = engine.status(project_id="demo")

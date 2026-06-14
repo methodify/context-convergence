@@ -21,7 +21,14 @@ import shutil
 
 from . import env, gitutil, secrets
 from .localstate import LocalState
-from .pathmap import encode_project_dir, normalize_jsonl
+from .pathmap import (
+    canonicalize_jsonl,
+    canonicalize_value,
+    encode_project_dir,
+    localize_jsonl,
+    localize_value,
+    normalize_jsonl,
+)
 from .roster import Participant, Roster
 from .transport import PushRejected, open_transport, project_branch, union_jsonl
 
@@ -44,7 +51,29 @@ def _local_context_dir(encoded_dir: str) -> str:
 
 
 def _local_context_files(encoded_dir: str) -> list[str]:
+    """Top-level session transcripts only (used for the 'has context' check)."""
     return sorted(glob.glob(os.path.join(_local_context_dir(encoded_dir), "*.jsonl")))
+
+
+def _kind_of(relpath: str) -> str:
+    return "jsonl" if relpath.endswith(".jsonl") else "text"
+
+
+def _context_entries(encoded_dir: str) -> list[tuple[str, str]]:
+    """Files convergence syncs from the local context dir, as (relpath, kind).
+
+    Included: top-level `*.jsonl` transcripts, and the entire `memory/` subtree
+    (markdown — as core as the transcripts on modern Claude Code). EXCLUDED: the
+    per-session `<uuid>/` subfolders that hold tool results and subagent
+    transcripts — treated as ephemeral for now. kind is 'jsonl' or 'text'.
+    """
+    base = _local_context_dir(encoded_dir)
+    entries = [(os.path.basename(f), "jsonl")
+               for f in sorted(glob.glob(os.path.join(base, "*.jsonl")))]
+    for f in sorted(glob.glob(os.path.join(base, "memory", "**", "*"), recursive=True)):
+        if os.path.isfile(f):
+            entries.append((os.path.relpath(f, base), "text"))
+    return entries
 
 
 def _read(path: str) -> str:
@@ -73,26 +102,60 @@ def _resolve_state(project_root: str | None, project_id: str | None) -> LocalSta
     return matches[0]
 
 
-def _guarded_canonicalize(participant: Participant, text: str, rewrite_home: bool) -> str:
-    """Canonicalize, verifying the PATH rewriting reverses without data loss.
-    Compared against the normalized (compact-reserialized) form, not raw bytes,
-    so incidental JSON formatting is not mistaken for a round-trip failure."""
-    canon, _ = participant.canonicalize(text, rewrite_home)
-    if participant.localize(canon, rewrite_home)[0] != normalize_jsonl(text):
+def _guarded_canonicalize(participant: Participant, text: str, kind: str, rewrite_home: bool):
+    """Canonicalize one file (kind 'jsonl' or 'text'), verifying the PATH
+    rewriting reverses without data loss. JSONL is compared against the
+    normalized (compact-reserialized) form so incidental formatting isn't
+    mistaken for a failure; text (markdown memory) is compared byte-for-byte.
+    Returns (canon, n_substitutions)."""
+    maps = participant.mappings(rewrite_home)
+    if kind == "jsonl":
+        canon, n = canonicalize_jsonl(text, maps)
+        ok = localize_jsonl(canon, maps)[0] == normalize_jsonl(text)
+    else:
+        canon, n = canonicalize_value(text, maps)
+        ok = localize_value(canon, maps)[0] == text
+    if not ok:
         raise ConvergenceError(
-            "refusing to push: a transcript did not round-trip losslessly "
+            "refusing to push: a file did not round-trip losslessly "
             "(run `doctor` to inspect). No data was written.")
-    return canon
+    return canon, n
+
+
+def _localize_entry(participant: Participant, text: str, kind: str, rewrite_home: bool):
+    maps = participant.mappings(rewrite_home)
+    return localize_jsonl(text, maps) if kind == "jsonl" else localize_value(text, maps)
+
+
+def _localize_into_local(transport, participant, encoded, rewrite_home):
+    """Localize every cluster file into the local context dir, preserving
+    relative structure (so memory/ lands under memory/)."""
+    local_dir = _local_context_dir(encoded)
+    n_files = n_subs = 0
+    for relpath in transport.cluster.context_files():
+        text, n = _localize_entry(participant, transport.cluster.read_context(relpath),
+                                  _kind_of(relpath), rewrite_home)
+        dest = os.path.join(local_dir, relpath)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        n_files += 1
+        n_subs += n
+    return n_files, n_subs
 
 
 def _backup_local_context(encoded_dir: str) -> str | None:
-    files = _local_context_files(encoded_dir)
-    if not files:
+    """Back up every synced file (transcripts AND memory) before pull/join
+    overwrites the local context dir, preserving relative structure."""
+    entries = _context_entries(encoded_dir)
+    if not entries:
         return None
+    base = _local_context_dir(encoded_dir)
     dst = os.path.join(env.convergence_home(), "backups", encoded_dir, env.now_iso().replace(":", ""))
-    os.makedirs(dst, exist_ok=True)
-    for f in files:
-        shutil.copy2(f, os.path.join(dst, os.path.basename(f)))
+    for relpath, _ in entries:
+        target = os.path.join(dst, relpath)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copy2(os.path.join(base, relpath), target)
     return dst
 
 
@@ -111,19 +174,20 @@ def _publishing(op):
 
 def _write_canonical(transport, participant, encoded, rewrite_home, *, union):
     """Canonicalize this machine's local context into the cluster working tree.
-    On push, union with whatever the branch already holds so no records drop."""
+    Transcripts (append-mostly) union with whatever the branch already holds so
+    no records drop; memory files are documents, so the local copy wins (git
+    history preserves prior versions)."""
     n_files = n_subs = 0
-    for f in _local_context_files(encoded):
-        text = _read(f)
-        canon = _guarded_canonicalize(participant, text, rewrite_home)
-        name = os.path.basename(f)
-        if union:
-            existing = transport.cluster.read_context(name)
+    for relpath, kind in _context_entries(encoded):
+        text = _read(os.path.join(_local_context_dir(encoded), relpath))
+        canon, n = _guarded_canonicalize(participant, text, kind, rewrite_home)
+        if union and kind == "jsonl":
+            existing = transport.cluster.read_context(relpath)
             if existing is not None:
                 canon = union_jsonl(existing, canon)
-        transport.cluster.write_context(name, canon)
+        transport.cluster.write_context(relpath, canon)
         n_files += 1
-        n_subs += participant.canonicalize(text, rewrite_home)[1]
+        n_subs += n
     return n_files, n_subs
 
 
@@ -198,19 +262,12 @@ def join(project_root, remote=None, cluster=None, project_id=None) -> dict:
     _publishing(op)
 
     backup = _backup_local_context(encoded)
-    local_dir = _local_context_dir(encoded)
-    os.makedirs(local_dir, exist_ok=True)
-    n_files = n_subs = 0
-    for cf in transport.cluster.context_files():
-        text, n = result["participant"].localize(_read(cf), result["rewrite_home"])
-        with open(os.path.join(local_dir, os.path.basename(cf)), "w", encoding="utf-8") as fh:
-            fh.write(text)
-        n_files += 1
-        n_subs += n
-
+    n_files, n_subs = _localize_into_local(transport, result["participant"],
+                                           encoded, result["rewrite_home"])
     _save_state(pid, mid, transport, root, encoded, remote, now)
     return {"project_id": pid, "machine_id": mid, "files": n_files, "substitutions": n_subs,
-            "participants": result["participants"], "backup": backup, "local_dir": local_dir}
+            "participants": result["participants"], "backup": backup,
+            "local_dir": _local_context_dir(encoded)}
 
 
 # --------------------------------------------------------------------------- #
@@ -265,21 +322,13 @@ def pull(project_root=None, project_id=None) -> dict:
             f"this machine ({st.machine_id}) is not in the roster for '{st.project_id}'")
 
     backup = _backup_local_context(st.encoded_dir)
-    local_dir = _local_context_dir(st.encoded_dir)
-    os.makedirs(local_dir, exist_ok=True)
-    n_files = n_subs = 0
-    for cf in transport.cluster.context_files():
-        text, n = participant.localize(_read(cf), roster.rewrite_home)
-        with open(os.path.join(local_dir, os.path.basename(cf)), "w", encoding="utf-8") as fh:
-            fh.write(text)
-        n_files += 1
-        n_subs += n
-
+    n_files, n_subs = _localize_into_local(transport, participant,
+                                           st.encoded_dir, roster.rewrite_home)
     st.last_converged = env.now_iso()
     st.last_converged_commit = gitutil.current_commit(transport.cluster.root)
     st.save()
     return {"project_id": st.project_id, "files": n_files, "substitutions": n_subs,
-            "backup": backup, "local_dir": local_dir}
+            "backup": backup, "local_dir": _local_context_dir(st.encoded_dir)}
 
 
 def sync(project_root=None, project_id=None) -> dict:
@@ -294,10 +343,11 @@ def sync(project_root=None, project_id=None) -> dict:
 # --------------------------------------------------------------------------- #
 def _scan_files(encoded_dir: str) -> dict:
     out = {}
-    for f in _local_context_files(encoded_dir):
-        findings = secrets.scan_text(_read(f))
+    base = _local_context_dir(encoded_dir)
+    for relpath, _kind in _context_entries(encoded_dir):
+        findings = secrets.scan_text(_read(os.path.join(base, relpath)))
         if findings:
-            out[os.path.basename(f)] = findings
+            out[relpath] = findings
     return out
 
 
@@ -324,19 +374,26 @@ def status(project_root=None, project_id=None) -> dict:
     roster = cluster.load_roster()
     participant = roster.get(st.machine_id)
 
-    local_files = {os.path.basename(f): f for f in _local_context_files(st.encoded_dir)}
-    cluster_files = {os.path.basename(f): f for f in cluster.context_files()}
+    base = _local_context_dir(st.encoded_dir)
+    local_entries = dict(_context_entries(st.encoded_dir))   # relpath -> kind
+    cluster_files = set(cluster.context_files())
+    maps = participant.mappings(roster.rewrite_home) if participant else None
 
     dirty = []
-    for name, lf in local_files.items():
-        if name not in cluster_files:
-            dirty.append(name)
-        elif participant:
-            canon = participant.canonicalize(_read(lf), roster.rewrite_home)[0]
-            remote_text = cluster.read_context(name)
-            if union_jsonl(remote_text, canon) != remote_text:
-                dirty.append(name)
-    behind = [n for n in cluster_files if n not in local_files]
+    for relpath, kind in local_entries.items():
+        if relpath not in cluster_files:
+            dirty.append(relpath)
+        elif maps:
+            remote_text = cluster.read_context(relpath)
+            if kind == "jsonl":
+                canon = canonicalize_jsonl(_read(os.path.join(base, relpath)), maps)[0]
+                if union_jsonl(remote_text, canon) != remote_text:
+                    dirty.append(relpath)
+            else:
+                canon = canonicalize_value(_read(os.path.join(base, relpath)), maps)[0]
+                if canon != remote_text:
+                    dirty.append(relpath)
+    behind = [n for n in cluster_files if n not in local_entries]
 
     return {
         "project_id": st.project_id, "machine_id": st.machine_id,
@@ -344,6 +401,6 @@ def status(project_root=None, project_id=None) -> dict:
         "project_root": st.project_root, "last_converged": st.last_converged,
         "participants": [(p.machine_id, p.os, p.project_root, p.last_converged)
                          for p in roster.participants],
-        "local_count": len(local_files), "cluster_count": len(cluster_files),
+        "local_count": len(local_entries), "cluster_count": len(cluster_files),
         "dirty": sorted(dirty), "behind": sorted(behind),
     }
