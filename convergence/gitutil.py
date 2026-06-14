@@ -117,3 +117,10 @@ def push(cwd: str, branch: str) -> subprocess.CompletedProcess:
 def current_commit(cwd: str) -> str | None:
     proc = _git(["rev-parse", "HEAD"], cwd=cwd, check=False)
     return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def show_file(cwd: str, commit: str, path: str) -> str | None:
+    """Content of `path` at `commit` (the 3-way merge base), or None if it did
+    not exist there. `path` is relative to the repo root, e.g. context/x.md."""
+    proc = _git(["show", f"{commit}:{path}"], cwd=cwd, check=False)
+    return proc.stdout if proc.returncode == 0 else None

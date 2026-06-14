@@ -52,6 +52,7 @@ def _cmd_sync(args) -> int:
     print(f"sync '{r['project_id']}': pulled {r['pulled']}, pushed {r['pushed']} file(s)")
     if r["backup"]:
         print(f"  backup: {r['backup']}")
+    _print_conflicts(r.get("conflicts"))
     return 0
 
 
@@ -116,12 +117,36 @@ def _print_secret_warnings(warnings) -> None:
             print(f"      {name}: {f}", file=sys.stderr)
 
 
+def _print_conflicts(conflicts) -> None:
+    if not conflicts:
+        return
+    div = [c for c in conflicts if c["kind"] == "session-divergence"]
+    mem = [c for c in conflicts if c["kind"] == "memory-conflict"]
+    if div:
+        print("  ⚠ SESSION DIVERGENCE — the same session was grown on two machines "
+              "(two diverging conversations):", file=sys.stderr)
+        for c in div:
+            print(f"      {c['path']} — kept the cluster's lineage; your local copy "
+                  f"is preserved in the pull backup under ~/.convergence/backups/.",
+                  file=sys.stderr)
+        print("    Recover by inspecting both lineages; convergence will not "
+              "concatenate them.", file=sys.stderr)
+    if mem:
+        print("  ⚠ MEMORY MERGE CONFLICTS — overlapping edits on two machines:",
+              file=sys.stderr)
+        for c in mem:
+            print(f"      {c['path']} ({c['count']} conflict region(s))", file=sys.stderr)
+        print("    Edit each file, resolve the <<<<<<< / ======= / >>>>>>> markers, "
+              "then sync again.", file=sys.stderr)
+
+
 def _cmd_push(args) -> int:
     r = engine.push(args.project_root, project_id=args.project_id,
                     scan_secrets=args.scan_secrets, strict_secrets=args.strict)
     print(f"push '{r['project_id']}': {r['files']} file(s), "
           f"{r['substitutions']} path(s) canonicalized -> {r['cluster']}")
     _print_secret_warnings(r.get("secret_warnings"))
+    _print_conflicts(r.get("conflicts"))
     return 0
 
 
@@ -178,6 +203,10 @@ def _cmd_status(args) -> int:
     print(f"  local files: {r['local_count']}   cluster files: {r['cluster_count']}")
     print(f"  dirty (push needed):  {', '.join(r['dirty']) or 'none'}")
     print(f"  behind (pull avail.): {', '.join(r['behind']) or 'none'}")
+    if r.get("conflicted"):
+        print(f"  ⚠ unresolved memory conflicts (edit, remove <<<<<<< markers, sync):")
+        for c in r["conflicted"]:
+            print(f"      {c}")
     print(f"  roster ({len(r['participants'])} participant(s)):")
     for mid, osn, root, lc in r["participants"]:
         print(f"    - {mid}  {osn}  {root}  (converged {lc})")

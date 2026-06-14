@@ -20,7 +20,7 @@ import os
 import shutil
 import tempfile
 
-from . import env, gitutil, secrets
+from . import env, gitutil, merge, secrets
 from .errors import ConvergenceError, LockBusy  # noqa: F401 (re-exported)
 from .localstate import LocalState
 from .lock import project_lock
@@ -219,23 +219,53 @@ def _publishing(op):
                            f"(branch kept advancing): {last}")
 
 
-def _write_canonical(transport, participant, encoded, rewrite_home, *, union):
-    """Canonicalize this machine's local context into the cluster working tree.
-    Transcripts (append-mostly) union with whatever the branch already holds so
-    no records drop; memory files are documents, so the local copy wins (git
-    history preserves prior versions)."""
+def _write_canonical(transport, participant, encoded, rewrite_home, *, union, base_commit=None):
+    """Canonicalize this machine's local context into the cluster working tree
+    and merge with whatever the branch already holds. Returns
+    (n_files, n_subs, conflicts) where each conflict is a dict describing a
+    session divergence or a memory merge conflict.
+
+    - identical / new file -> write as-is.
+    - transcript (.jsonl) that differs: union the appends UNLESS the two have
+      genuinely diverged (both grew the same session) — then keep the cluster's
+      lineage and flag it; never concatenate two threads into gibberish.
+    - memory (.md) that differs: line-level 3-way merge against the base
+      (last-converged commit); clean merges flow silently, real conflicts land
+      conflict markers in the file and are flagged.
+    """
+    conflicts: list[dict] = []
     n_files = n_subs = 0
     for relpath, kind in _context_entries(encoded):
         text = _read(os.path.join(_local_context_dir(encoded), relpath))
         canon, n = _guarded_canonicalize(participant, text, kind, rewrite_home)
-        if union and kind == "jsonl":
-            existing = transport.cluster.read_context(relpath)
-            if existing is not None:
-                canon = union_jsonl(existing, canon)
-        transport.cluster.write_context(relpath, canon)
+        existing = transport.cluster.read_context(relpath) if union else None
+
+        if existing is None or existing == canon:
+            transport.cluster.write_context(relpath, canon)
+        elif kind == "jsonl":
+            if merge.is_diverged(canon, existing):
+                conflicts.append({"path": relpath, "kind": "session-divergence"})
+                # keep the cluster's lineage; the local one stays put and is
+                # captured by pull's backup. Do NOT concatenate two threads.
+            else:
+                transport.cluster.write_context(relpath, union_jsonl(existing, canon))
+        elif base_commit is None:
+            # No 3-way base (local no-git cluster / single machine) — can't
+            # distinguish an edit from a conflict, so local wins.
+            transport.cluster.write_context(relpath, canon)
+        else:  # memory document that differs -> line-level 3-way merge
+            base = gitutil.show_file(transport.cluster.root, base_commit,
+                                     "context/" + relpath) or ""
+            # MEMORY.md is an append-only index: union both sides' bullets rather
+            # than conflicting on add/add at the end. Other docs get true 3-way.
+            is_index = os.path.basename(relpath) == "MEMORY.md"
+            merged, nconf = merge.three_way_merge(base, canon, existing, union=is_index)
+            transport.cluster.write_context(relpath, merged)
+            if nconf:
+                conflicts.append({"path": relpath, "kind": "memory-conflict", "count": nconf})
         n_files += 1
         n_subs += n
-    return n_files, n_subs
+    return n_files, n_subs, conflicts
 
 
 def _save_state(pid, mid, transport, root, encoded, remote, now):
@@ -274,10 +304,10 @@ def _init(root, encoded, pid, remote, cluster, rewrite_home) -> dict:
         participant = Participant(machine_id=mid, os=env.detected_os(),
                                   home=env.home_dir(), project_root=root, last_converged=now)
         roster = Roster(project_id=pid, rewrite_home=rewrite_home, participants=[participant])
-        n = _write_canonical(transport, participant, encoded, roster.rewrite_home, union=False)
+        nf, ns, _ = _write_canonical(transport, participant, encoded, roster.rewrite_home, union=False)
         transport.cluster.save_roster(roster)
         transport.publish(f"init {pid} from {mid}")
-        return n
+        return nf, ns
 
     n_files, n_subs = _publishing(op)
     _save_state(pid, mid, transport, root, encoded, remote, now)
@@ -355,18 +385,21 @@ def _push(st, scan_secrets=False, strict_secrets=False) -> dict:
         if not participant:
             raise ConvergenceError(
                 f"this machine ({st.machine_id}) is not in the roster for '{st.project_id}'")
-        nf, ns = _write_canonical(transport, participant, st.encoded_dir, roster.rewrite_home, union=True)
+        nf, ns, conflicts = _write_canonical(
+            transport, participant, st.encoded_dir, roster.rewrite_home,
+            union=True, base_commit=st.last_converged_commit)
         participant.last_converged = now
         transport.cluster.save_roster(roster)
         transport.publish(f"push {st.project_id} from {st.machine_id}")
-        out["files"], out["subs"] = nf, ns
+        out["files"], out["subs"], out["conflicts"] = nf, ns, conflicts
 
     _publishing(op)
     st.last_converged = now
     st.last_converged_commit = gitutil.current_commit(transport.cluster.root)
     st.save()
     return {"project_id": st.project_id, "files": out["files"], "substitutions": out["subs"],
-            "cluster": transport.cluster.root, "secret_warnings": warnings}
+            "cluster": transport.cluster.root, "secret_warnings": warnings,
+            "conflicts": out["conflicts"]}
 
 
 # --------------------------------------------------------------------------- #
@@ -409,7 +442,8 @@ def sync(project_root=None, project_id=None) -> dict:
         ph = _push(st)
         pl = _pull(st)
     return {"project_id": ph["project_id"], "pulled": pl["files"],
-            "pushed": ph["files"], "backup": pl["backup"]}
+            "pushed": ph["files"], "backup": pl["backup"],
+            "conflicts": ph["conflicts"]}
 
 
 # --------------------------------------------------------------------------- #
@@ -474,12 +508,19 @@ def _status(st) -> dict:
                     dirty.append(relpath)
     behind = [n for n in cluster_files if n not in local_entries]
 
+    # Unresolved memory merge conflicts persist as conflict markers in the file.
+    conflicted = []
+    for relpath, kind in local_entries.items():
+        if kind != "jsonl" and "<<<<<<< " in _read(os.path.join(base, relpath)):
+            conflicted.append(relpath)
+
     return {
         "project_id": st.project_id, "machine_id": st.machine_id,
         "cluster": st.cluster_root, "remote": st.remote, "branch": st.branch,
         "project_root": st.project_root, "last_converged": st.last_converged,
         "participants": [(p.machine_id, p.os, p.project_root, p.last_converged)
                          for p in roster.participants],
+        "conflicted": sorted(conflicted),
         "local_count": len(local_entries), "cluster_count": len(cluster_files),
         "dirty": sorted(dirty), "behind": sorted(behind),
     }
