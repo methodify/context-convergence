@@ -110,14 +110,37 @@ class GitTransport:
             raise GitError(result.stderr.strip())
 
 
+def _assert_safe_cluster_dir(path: str) -> None:
+    """Refuse a cluster/clone working dir that overlaps the Claude Code context
+    dir. git runs `reset --hard` and `clean -fd` in this dir, so if it sat at or
+    inside (or above) ~/.claude/projects, those would destroy live local context.
+    The default managed clone (~/.convergence/clones/<id>) is always safe."""
+    from . import env
+    from .engine import ConvergenceError
+    cc = os.path.abspath(env.claude_projects_dir())
+    p = os.path.abspath(path)
+    try:
+        common = os.path.commonpath([p, cc])
+    except ValueError:  # different drives (Windows) — cannot overlap
+        return
+    if common in (p, cc):  # equal, or one contains the other
+        raise ConvergenceError(
+            f"refusing to use {p} as a cluster working dir: it overlaps your "
+            f"Claude Code context dir ({cc}). git operations there could destroy "
+            f"local context. Use a path outside ~/.claude/projects — the default "
+            f"managed clone under ~/.convergence/clones is safe.")
+
+
 def open_transport(project_id: str, remote: str | None, clone_or_cluster: str | None):
     """A GitTransport for a remote-backed project (convergence-managed clone),
     or a LocalTransport for a no-git local cluster directory."""
     if remote:
         from . import env
         clone = clone_or_cluster or env.clone_dir(project_id)
+        _assert_safe_cluster_dir(clone)
         return GitTransport(clone, remote, project_branch(project_id))
     if not clone_or_cluster:
         from .engine import ConvergenceError
         raise ConvergenceError("a local cluster needs --cluster <dir> (or use --remote)")
+    _assert_safe_cluster_dir(clone_or_cluster)
     return LocalTransport(clone_or_cluster, project_id)

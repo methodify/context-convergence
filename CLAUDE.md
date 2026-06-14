@@ -90,7 +90,19 @@ Other invariants:
 - **Refs with no exact equivalent stay machine-specific** (lossless, advisory in doctor): another project's context dir (its encoded segment can't be recomputed for B), nested/firmlink paths, malformed doubled-home paths. Everything with an exact per-machine equivalent (root, own context dir, home prefix) IS rewritten.
 - **Literal-sentinel escaping is load-bearing here.** This repo's own context contains `{{CC_PROJECT_ROOT}}` verbatim. The `{{S(_LIT)*}}` escape family makes canonicalize/localize a true inverse pair; don't remove it or convergence can't sync its own context.
 - **Fail loud, never guess.** Never ship a half-rewritten transcript. Context is irreplaceable; the prime directive is *never silently corrupt or lose context.*
-- **Back up before localize.** Pull writes into `~/.claude/projects/` — back up the target (timestamped) before overwriting (`engine._backup_local_context`).
+
+### Corruption resistance (local context dir is sacred)
+
+The protections that keep `~/.claude/projects/` safe — do not weaken these:
+
+- **Nothing deletes.** No `os.remove`/`unlink`/`rmtree`/`rename` exists in the package. Convergence never removes a local file.
+- **git never touches the local dir.** `reset --hard`/`clean -fd` run only with `cwd =` the clone (`~/.convergence/clones/<id>/`). `open_transport` **refuses** any cluster/clone path overlapping `claude_projects_dir` (`transport._assert_safe_cluster_dir`) — guards the `--cluster` footgun.
+- **Backup before overwrite.** pull/join copy every synced file (byte-exact) to `~/.convergence/backups/<encoded>/<ts>/` *before* writing; if backup throws, the run aborts before any overwrite.
+- **Atomic writes.** Local writes go through `_atomic_write` (temp in same dir + `os.replace`) — a crash mid-write leaves the existing file intact, never truncated.
+- **`sync` is push-THEN-pull.** Push first so this machine's local-ahead content (memory edited in place, a continued transcript) is union-merged into the cluster *before* pull overwrites the local dir. Pull-first would clobber unpushed local work (recoverable only from backup). Don't reorder.
+- **Round-trip guard on push** refuses any file that doesn't reverse losslessly.
+
+Known lower-priority gaps (not yet hardened): no concurrency lock (Stop-hook sync + manual sync can interleave); reads use `errors="replace"` (lossy on non-UTF-8, can't be caught by the guard); backups aren't pruned and same-second backups share a dir. Memory files are cross-machine LWW (local-wins on push; git history backstops).
 
 ## Working with real context data
 

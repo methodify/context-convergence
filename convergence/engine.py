@@ -18,6 +18,7 @@ from __future__ import annotations
 import glob
 import os
 import shutil
+import tempfile
 
 from . import env, gitutil, secrets
 from .localstate import LocalState
@@ -81,6 +82,25 @@ def _read(path: str) -> str:
         return fh.read()
 
 
+def _atomic_write(path: str, text: str) -> None:
+    """Write `text` to `path` atomically: a temp file in the same directory then
+    os.replace (an atomic rename). A crash mid-write leaves the existing file
+    intact — never a truncated/half-written live context file."""
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".convergence-tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)  # atomic on the same filesystem
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _resolve_state(project_root: str | None, project_id: str | None) -> LocalState:
     if project_id:
         st = LocalState.load(project_id)
@@ -135,10 +155,7 @@ def _localize_into_local(transport, participant, encoded, rewrite_home):
     for relpath in transport.cluster.context_files():
         text, n = _localize_entry(participant, transport.cluster.read_context(relpath),
                                   _kind_of(relpath), rewrite_home)
-        dest = os.path.join(local_dir, relpath)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        with open(dest, "w", encoding="utf-8") as fh:
-            fh.write(text)
+        _atomic_write(os.path.join(local_dir, relpath), text)
         n_files += 1
         n_subs += n
     return n_files, n_subs
@@ -332,8 +349,12 @@ def pull(project_root=None, project_id=None) -> dict:
 
 
 def sync(project_root=None, project_id=None) -> dict:
-    pl = pull(project_root, project_id)
+    """Push THEN pull. Push first so this machine's local-ahead content (memory
+    edited in place, a transcript continued since last push) is union-merged into
+    the cluster before pull overwrites the local dir — otherwise a pull-first
+    sync would clobber unpushed local work (recoverable only from backup)."""
     ph = push(project_root, project_id)
+    pl = pull(project_root, project_id)
     return {"project_id": ph["project_id"], "pulled": pl["files"],
             "pushed": ph["files"], "backup": pl["backup"]}
 
