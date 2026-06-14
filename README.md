@@ -26,16 +26,24 @@ Your cluster is **one private git repo**. Each project is a branch
 
 ```sh
 # First machine — register this project's context in the cluster.
+# The first --remote you use becomes this machine's default, so you name it once.
 convergence init ~/src/proj --remote git@github.com:you/context-cluster.git
 
-# Another machine — pull just this project down, localized to local paths.
-convergence join ~/src/proj --remote git@github.com:you/context-cluster.git
+# More projects into the same cluster — no --remote needed.
+convergence init ~/src/other-proj
+convergence projects                               # list projects in the cluster
 
-# Day to day.
+# Another machine — set the default once, then pull projects down.
+convergence remote set git@github.com:you/context-cluster.git
+convergence join ~/src/proj                        # localized to this machine's paths
+
+# Day to day (these already remember the remote per project).
 convergence sync                                   # pull then push (or via the hook below)
 convergence status                                 # what's dirty / behind, plus the roster
-convergence projects --remote <url>                # list projects in the cluster
 ```
+
+`--remote` always overrides the default — reserve it for a second, separate
+cluster. `convergence remote` shows the current default; `remote clear` unsets it.
 
 Because each project is its own orphan branch, **joining one project never
 downloads the others' history** — a machine fetches only what it asks for. Add a

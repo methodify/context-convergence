@@ -33,9 +33,13 @@ python3 -m unittest tests.test_engine              # one module
 # clone is managed under ~/.convergence/clones/<id>/ — you just pass --remote.
 python3 -m convergence init <project_root> --remote <git-url> [--project-id ID] [--no-rewrite-home]
 python3 -m convergence join <project_root> --remote <git-url> [--project-id ID]
-python3 -m convergence projects --remote <git-url>            # list projects (branches)
+python3 -m convergence projects [--remote <git-url>]         # list projects (branches)
+python3 -m convergence remote [show|set <url>|clear]         # machine-level default remote
 python3 -m convergence push|pull|sync|status [project_root] [--project-id ID]
 #   (--cluster <dir> instead of --remote = a local no-git cluster, one project per dir)
+# --remote is optional on init/join/projects: falls back to the default remote
+# (config.resolve_remote: explicit > CONVERGENCE_REMOTE env > stored default).
+# The first git --remote a machine uses is auto-adopted as its default.
 python3 -m convergence push <project_root> --scan-secrets [--strict]   # opt-in secret scan
 python3 -m convergence scan [project_root]                             # secret scan, no sync
 python3 -m convergence hook install|uninstall|status [--event Stop|SessionEnd]
@@ -50,7 +54,7 @@ Real context dirs live at `~/.claude/projects/<encoded-dir>/`. `doctor` on this 
 
 ### Module map
 
-`pathmap.py` (path-mapping core, no I/O) · `roster.py` (`Participant`/`Roster` + persistence) · `cluster.py` (`Cluster` = one project's tree: `roster.json` + `context/`) · `localstate.py` (per-machine project marker → its clone, remote, branch) · `env.py` (location/clock/machine-id/os/settings/`clone_dir` resolution, all env-overridable) · `gitutil.py` (branch-aware git wrappers: orphan branches, single-branch clone, `ls-remote`) · `transport.py` (`LocalTransport`/`GitTransport` + `project_branch` + `union_jsonl`) · `secrets.py` (curated secret patterns) · `hooks.py` (Stop-hook install + soft-failing `hook_sync`) · `engine.py` (the verbs + `list_projects`; fail-loud round-trip guard on push, backup-before-overwrite on pull, publish-retry, opt-in secret scan) · `doctor.py` (honesty scan) · `__main__.py` (CLI).
+`pathmap.py` (path-mapping core, no I/O) · `roster.py` (`Participant`/`Roster` + persistence) · `cluster.py` (`Cluster` = one project's tree: `roster.json` + `context/`) · `config.py` (machine-level default remote) · `localstate.py` (per-machine project marker → its clone, remote, branch) · `env.py` (location/clock/machine-id/os/settings/`clone_dir` resolution, all env-overridable) · `gitutil.py` (branch-aware git wrappers: orphan branches, single-branch clone, `ls-remote`) · `transport.py` (`LocalTransport`/`GitTransport` + `project_branch` + `union_jsonl`) · `secrets.py` (curated secret patterns) · `hooks.py` (Stop-hook install + soft-failing `hook_sync`) · `engine.py` (the verbs + `list_projects`; fail-loud round-trip guard on push, backup-before-overwrite on pull, publish-retry, opt-in secret scan) · `doctor.py` (honesty scan) · `__main__.py` (CLI).
 
 The push guard compares against `normalize_jsonl(text)` (compact re-serialization), not raw bytes — it verifies *data* reversibility, not incidental whitespace. Tests are sandboxed via the `env.py` overrides; `CLAUDE_SETTINGS_PATH` redirects hook install away from the real settings.json.
 

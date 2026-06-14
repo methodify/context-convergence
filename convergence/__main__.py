@@ -19,18 +19,31 @@ import glob
 import os
 import sys
 
-from . import engine, hooks
+from . import config, engine, hooks
 from .doctor import format_report, scan
 from .pathmap import DEFAULT_SENTINEL, canonicalize_jsonl_root, localize_jsonl_root
 
 
+def _adopt_default_remote(remote, cluster) -> bool:
+    """First git cluster a machine sees becomes its default, so later
+    init/join/projects need no --remote. Returns True if newly adopted."""
+    if remote and not cluster and not config.get_default_remote():
+        config.set_default_remote(remote)
+        return True
+    return False
+
+
 def _cmd_init(args) -> int:
-    r = engine.init(args.project_root, remote=args.remote, cluster=args.cluster,
+    remote = config.resolve_remote(args.remote)
+    adopted = _adopt_default_remote(remote, args.cluster)
+    r = engine.init(args.project_root, remote=remote, cluster=args.cluster,
                     project_id=args.project_id, rewrite_home=not args.no_rewrite_home)
     print(f"init '{r['project_id']}' (machine {r['machine_id']}): "
           f"{r['files']} file(s), {r['substitutions']} path(s) canonicalized")
     where = f"branch {r['branch']} on {r['remote']}" if r["remote"] else f"local {r['cluster']}"
     print(f"  {where}\n  clone: {r['cluster']}")
+    if adopted:
+        print(f"  (default remote set to {remote} — future commands can omit --remote)")
     return 0
 
 
@@ -43,22 +56,51 @@ def _cmd_sync(args) -> int:
 
 
 def _cmd_join(args) -> int:
-    r = engine.join(args.project_root, remote=args.remote, cluster=args.cluster,
+    remote = config.resolve_remote(args.remote)
+    adopted = _adopt_default_remote(remote, args.cluster)
+    r = engine.join(args.project_root, remote=remote, cluster=args.cluster,
                     project_id=args.project_id)
     print(f"join '{r['project_id']}' (machine {r['machine_id']}): "
           f"{r['files']} file(s), {r['substitutions']} path(s) localized -> {r['local_dir']}")
     print(f"  roster now has {r['participants']} participant(s)")
     if r["backup"]:
         print(f"  backup: {r['backup']}")
+    if adopted:
+        print(f"  (default remote set to {remote} — future commands can omit --remote)")
+    return 0
+
+
+def _cmd_remote(args) -> int:
+    if args.action == "set":
+        if not args.url:
+            print("error: `convergence remote set <url>` needs a URL", file=sys.stderr)
+            return 2
+        config.set_default_remote(args.url)
+        print(f"default remote set: {args.url}")
+    elif args.action == "clear":
+        config.clear_default_remote()
+        print("default remote cleared")
+    else:  # show
+        d = config.get_default_remote()
+        print(f"default remote: {d}" if d else "no default remote set "
+              "(use `convergence remote set <url>`)")
+        override = config.resolve_remote(None)
+        if override and override != d:
+            print(f"  (overridden this shell by CONVERGENCE_REMOTE: {override})")
     return 0
 
 
 def _cmd_projects(args) -> int:
-    ids = engine.list_projects(args.remote)
+    remote = config.resolve_remote(args.remote)
+    if not remote:
+        print("error: no remote — pass --remote or set a default "
+              "(`convergence remote set <url>`)", file=sys.stderr)
+        return 2
+    ids = engine.list_projects(remote)
     if not ids:
         print("no projects in this cluster yet")
         return 0
-    print(f"{len(ids)} project(s) in {args.remote}:")
+    print(f"{len(ids)} project(s) in {remote}:")
     for pid in ids:
         print(f"  {pid}")
     return 0
@@ -213,8 +255,13 @@ def main(argv=None) -> int:
     j.set_defaults(func=_cmd_join)
 
     pr = sub.add_parser("projects", help="list projects (branches) in a cluster repo")
-    pr.add_argument("--remote", required=True)
+    pr.add_argument("--remote", default=None, help="defaults to the configured default remote")
     pr.set_defaults(func=_cmd_projects)
+
+    rm = sub.add_parser("remote", help="show/set the default cluster remote")
+    rm.add_argument("action", nargs="?", default="show", choices=["show", "set", "clear"])
+    rm.add_argument("url", nargs="?", default=None)
+    rm.set_defaults(func=_cmd_remote)
 
     pushp = sub.add_parser("push", help="localize->canonicalize local context into the cluster")
     pushp.add_argument("project_root", nargs="?", default=None)
