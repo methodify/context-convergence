@@ -76,8 +76,17 @@ def _context_entries(encoded_dir: str) -> list[tuple[str, str]]:
 
 
 def _read(path: str) -> str:
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        return fh.read()
+    """Read a context file STRICTLY. A non-UTF-8 byte would be silently swapped
+    for U+FFFD under errors='replace' and then written back mangled — and the
+    push round-trip guard can't catch it (it compares the mangled read to
+    itself). So fail loud instead: better to refuse than to corrupt."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except UnicodeDecodeError as e:
+        raise ConvergenceError(
+            f"{path} is not valid UTF-8 (at byte {e.start}); refusing to process "
+            f"it to avoid corrupting context. Inspect the file, then retry.")
 
 
 def _atomic_write(path: str, text: str) -> None:
@@ -159,19 +168,42 @@ def _localize_into_local(transport, participant, encoded, rewrite_home):
     return n_files, n_subs
 
 
+_BACKUP_KEEP = 10  # timestamped backups retained per project
+
+
 def _backup_local_context(encoded_dir: str) -> str | None:
     """Back up every synced file (transcripts AND memory) before pull/join
-    overwrites the local context dir, preserving relative structure."""
+    overwrites the local context dir, preserving relative structure. The backup
+    dir name is collision-proof (a `-N` suffix if the same second recurs) and old
+    backups are pruned to the newest _BACKUP_KEEP."""
     entries = _context_entries(encoded_dir)
     if not entries:
         return None
     base = _local_context_dir(encoded_dir)
-    dst = os.path.join(env.convergence_home(), "backups", encoded_dir, env.now_iso().replace(":", ""))
+    parent = os.path.join(env.convergence_home(), "backups", encoded_dir)
+    stamp = env.now_iso().replace(":", "")
+    dst = os.path.join(parent, stamp)
+    i = 2
+    while os.path.exists(dst):  # don't overwrite an existing same-second backup
+        dst = os.path.join(parent, f"{stamp}-{i}")
+        i += 1
     for relpath, _ in entries:
         target = os.path.join(dst, relpath)
         os.makedirs(os.path.dirname(target), exist_ok=True)
         shutil.copy2(os.path.join(base, relpath), target)
+    _prune_backups(parent)
     return dst
+
+
+def _prune_backups(parent: str, keep: int = _BACKUP_KEEP) -> None:
+    """Keep only the newest `keep` backup dirs under `parent`. Scoped strictly to
+    `~/.convergence/backups/...` — never touches user content."""
+    try:
+        dirs = sorted(d for d in os.listdir(parent) if os.path.isdir(os.path.join(parent, d)))
+    except FileNotFoundError:
+        return
+    for old in dirs[:-keep]:
+        shutil.rmtree(os.path.join(parent, old), ignore_errors=True)
 
 
 def _publishing(op):

@@ -93,6 +93,33 @@ class SafetyTest(unittest.TestCase):
         from convergence.cluster import Cluster
         self.assertTrue(Cluster(self.cluster).has_roster())
 
+    # -- #5: non-UTF-8 fails loud instead of being mangled --------------- #
+    def test_push_refuses_non_utf8_file(self):
+        engine.init(ROOT, cluster=self.cluster)
+        with open(os.path.join(self.ctx, "memory", "bad.md"), "wb") as fh:
+            fh.write(b"start \xff\xfe end")                # invalid UTF-8
+        with self.assertRaises(engine.ConvergenceError):
+            engine.push(project_id="demo")
+
+    # -- #6: backup hygiene (no collision, pruned to N) ------------------ #
+    def test_backups_do_not_collide_same_second(self):
+        engine.init(ROOT, cluster=self.cluster)
+        enc = encode_project_dir(ROOT)
+        b1 = engine._backup_local_context(enc)             # same pinned CONVERGENCE_NOW
+        b2 = engine._backup_local_context(enc)
+        self.assertNotEqual(b1, b2)
+        self.assertTrue(os.path.isdir(b1) and os.path.isdir(b2))
+
+    def test_backups_pruned_to_keep(self):
+        engine.init(ROOT, cluster=self.cluster)
+        enc = encode_project_dir(ROOT)
+        for s in range(engine._BACKUP_KEEP + 4):           # distinct seconds
+            os.environ["CONVERGENCE_NOW"] = f"2026-06-14T00:00:{s:02d}Z"
+            engine._backup_local_context(enc)
+        parent = os.path.join(env.convergence_home(), "backups", enc)
+        kept = [d for d in os.listdir(parent) if os.path.isdir(os.path.join(parent, d))]
+        self.assertEqual(len(kept), engine._BACKUP_KEEP)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

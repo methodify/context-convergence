@@ -95,15 +95,17 @@ Other invariants:
 
 The protections that keep `~/.claude/projects/` safe — do not weaken these:
 
-- **Nothing deletes.** No `os.remove`/`unlink`/`rmtree`/`rename` exists in the package. Convergence never removes a local file.
+- **Nothing deletes local context.** The only `rmtree` in the package is `_prune_backups`, scoped strictly to `~/.convergence/backups/<encoded>/` (keeps the newest `_BACKUP_KEEP`). Nothing ever removes a file under `~/.claude/projects/`.
 - **git never touches the local dir.** `reset --hard`/`clean -fd` run only with `cwd =` the clone (`~/.convergence/clones/<id>/`). `open_transport` **refuses** any cluster/clone path overlapping `claude_projects_dir` (`transport._assert_safe_cluster_dir`) — guards the `--cluster` footgun.
 - **Backup before overwrite.** pull/join copy every synced file (byte-exact) to `~/.convergence/backups/<encoded>/<ts>/` *before* writing; if backup throws, the run aborts before any overwrite.
 - **Atomic writes.** Local writes go through `_atomic_write` (temp in same dir + `os.replace`) — a crash mid-write leaves the existing file intact, never truncated.
 - **`sync` is push-THEN-pull.** Push first so this machine's local-ahead content (memory edited in place, a continued transcript) is union-merged into the cluster *before* pull overwrites the local dir. Pull-first would clobber unpushed local work (recoverable only from backup). Don't reorder.
 - **Per-project lock** (`lock.project_lock`, an `flock` on `~/.convergence/locks/<id>.lock`). init/join/push/pull/sync/status acquire it non-blocking; a second concurrent run raises `LockBusy` (the Stop hook logs-and-skips, a manual command tells the user to retry). Re-entrant within a process (sync holds it across push+pull). flock auto-releases on process exit, so no stale locks.
 - **Round-trip guard on push** refuses any file that doesn't reverse losslessly.
+- **Strict reads on the sync path.** `engine._read` and `Cluster.read_context` read UTF-8 strictly and raise `ConvergenceError` on a decode error, rather than `errors="replace"` silently swapping bad bytes for U+FFFD and writing them back (which the guard can't catch). (doctor stays tolerant — it's read-only analysis.)
+- **Backups are collision-proof and pruned** (`-N` suffix on same-second; newest `_BACKUP_KEEP` retained).
 
-Known lower-priority gaps (not yet hardened): reads use `errors="replace"` (lossy on non-UTF-8, can't be caught by the guard); backups aren't pruned and same-second backups share a dir. Memory files are cross-machine LWW (local-wins on push; git history backstops).
+Remaining known limitation: memory files are cross-machine LWW (local-wins on push; git history backstops a clobbered remote edit).
 
 ## Working with real context data
 

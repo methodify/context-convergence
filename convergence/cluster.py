@@ -18,6 +18,7 @@ from __future__ import annotations
 import glob
 import os
 
+from .errors import ConvergenceError
 from .roster import Roster
 
 README_MAIN = """\
@@ -75,11 +76,16 @@ class Cluster:
         return out
 
     def read_context(self, relpath: str) -> str | None:
+        path = os.path.join(self.context_dir, relpath)
         try:
-            with open(os.path.join(self.context_dir, relpath), encoding="utf-8", errors="replace") as fh:
+            with open(path, encoding="utf-8") as fh:  # strict: never mangle on read
                 return fh.read()
         except FileNotFoundError:
             return None
+        except UnicodeDecodeError as e:
+            raise ConvergenceError(
+                f"cluster file {relpath} is not valid UTF-8 (at byte {e.start}); "
+                f"refusing to localize it to avoid corrupting context.")
 
     def write_context(self, relpath: str, text: str) -> None:
         path = os.path.join(self.context_dir, relpath)
