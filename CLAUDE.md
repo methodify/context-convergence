@@ -67,10 +67,12 @@ The push guard compares against `normalize_jsonl(text)` (compact re-serializatio
 The whole product is a bet that **the path-surface inside transcripts is enumerable and rewriting is safely reversible.** Everything else is plumbing.
 
 - **Canonical form** is what lives in the cluster repo: machine-specific anchors are replaced by sentinels. The cluster never stores any one machine's local paths as authoritative — this is what keeps the repo diffable and lets git's own merge machinery work instead of every line colliding on differing absolute paths.
-- **Three rewrite tiers** (`build_mappings`, applied longest-anchor-first so specific beats general), a cluster-wide policy fixed at init (`roster.rewrite_home`):
+- **Four rewrite tiers** (`build_mappings`, applied longest-anchor-first so specific beats general), a cluster-wide policy fixed at init (`roster.rewrite_home`):
   1. project root → `{{CC_PROJECT_ROOT}}`
   2. `<home>/.claude/projects/<encoded>` → `{{CC_PROJECT_CONTEXT_DIR}}` (own context dir; both home AND the lossy encoded segment change per machine, so it gets its own exact sentinel)
-  3. `<home>` → `{{CC_HOME}}` (covers `~/.claude/*`, dotfiles, and sibling projects by the `~/src/{project}` convention; opt out with `init --no-rewrite-home`)
+  3. `<encoded_dir>` → `{{CC_ENCODED_DIR}}` (the bare encoded dir name — appears standalone or inside tilde paths `~/.claude/projects/<encoded>`, common in **memory** files where the absolute context-dir tier doesn't reach; localizes the tilde case correctly because `~` is already portable and the sentinel fixes the encoded segment)
+  4. `<home>` → `{{CC_HOME}}` (covers `~/.claude/*`, dotfiles, and sibling projects by the `~/src/{project}` convention; opt out with `init --no-rewrite-home`)
+  Not rewritten (inherent limit): *other* projects' encoded dirs (e.g. a memory note citing `~/.claude/projects/-Users-…-catalog/`) — there's no portable target since we can't know machine B's layout for a different project.
 - **canonicalize** (local → canonical) and **localize** (canonical → local) are the two core transforms, parameterized by a machine's **roster** entry (`home`, `project_root`, `encoded_dir`).
 - The correctness core is the invariant `canonicalize(localize(x)) == x` and vice versa, for any participant. This must have **property tests** — it is the spec.
 

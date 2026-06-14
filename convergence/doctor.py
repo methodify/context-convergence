@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from . import env
 from .pathmap import (
     SENTINEL_CONTEXT_DIR,
+    SENTINEL_ENCODED_DIR,
     SENTINEL_HOME,
     SENTINEL_PROJECT_ROOT,
     canonicalize_jsonl,
@@ -138,6 +139,8 @@ def scan(context_dir, root=None, home=None, rewrite_home=True) -> DoctorReport:
                     rep.tier_hits[SENTINEL_CONTEXT_DIR] += 1
                 elif rep.project_root in sval:
                     rep.tier_hits[SENTINEL_PROJECT_ROOT] += 1
+                elif participant.encoded_dir in sval:
+                    rep.tier_hits[SENTINEL_ENCODED_DIR] += 1
                 elif rewrite_home and rep.home in sval:
                     rep.tier_hits[SENTINEL_HOME] += 1
     return rep
@@ -163,7 +166,7 @@ def format_report(rep: DoctorReport) -> str:
             L.append(f"        {s}")
 
     L.append("  rewrite coverage (string values per tier):")
-    for label in (SENTINEL_PROJECT_ROOT, SENTINEL_CONTEXT_DIR, SENTINEL_HOME):
+    for label in (SENTINEL_PROJECT_ROOT, SENTINEL_CONTEXT_DIR, SENTINEL_ENCODED_DIR, SENTINEL_HOME):
         L.append(f"        {rep.tier_hits.get(label, 0):7d}  {label}")
     L.append("  idempotency on real data:")
     L.append("        round-trip localize(canonicalize(x)) == x : "

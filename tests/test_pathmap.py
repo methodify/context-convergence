@@ -22,6 +22,7 @@ import unittest
 from convergence.pathmap import (
     DEFAULT_SENTINEL,
     SENTINEL_CONTEXT_DIR,
+    SENTINEL_ENCODED_DIR,
     SENTINEL_HOME,
     SENTINEL_PROJECT_ROOT,
     build_mappings,
@@ -34,6 +35,8 @@ from convergence.pathmap import (
 )
 from convergence.pathmap import canonicalize_jsonl as canonicalize_jsonl_m
 from convergence.pathmap import localize_jsonl as localize_jsonl_m
+from convergence.pathmap import canonicalize_value as canonicalize_value_m
+from convergence.pathmap import localize_value as localize_value_m
 from convergence.roster import Participant
 
 # Known (real_root -> encoded_dir) pairs captured from this machine on 2026-06-13.
@@ -343,6 +346,32 @@ class TestTieredMappings(unittest.TestCase):
         b_doc = self._doc(self.B_HOME, self.B_ROOT)
         canon_b, _ = canonicalize_jsonl_m(b_doc, self._maps(self.B_HOME, self.B_ROOT))
         self.assertEqual(canon, canon_b)
+
+    def test_bare_encoded_dir_and_tilde_paths(self):
+        # Memory files write the encoded dir bare or inside a tilde path; the
+        # absolute context-dir tier doesn't reach those, the encoded-dir tier does.
+        a_enc = encode_project_dir(self.A_ROOT)
+        text = f"see `{a_enc}/` and ~/.claude/projects/{a_enc}/x.jsonl\n"
+        maps = self._maps(self.A_HOME, self.A_ROOT)
+        canon, _ = canonicalize_value_m(text, maps)
+        self.assertNotIn(a_enc, canon)                  # bare encoded dir rewritten
+        self.assertIn(SENTINEL_ENCODED_DIR, canon)
+        self.assertEqual(localize_value_m(canon, maps)[0], text)   # round-trips on A
+        # localizes to B's home (~ stays) AND B's encoded dir:
+        b_text, _ = localize_value_m(canon, self._maps(self.B_HOME, self.B_ROOT))
+        b_enc = encode_project_dir(self.B_ROOT)
+        self.assertIn(f"`{b_enc}/`", b_text)
+        self.assertIn(f"~/.claude/projects/{b_enc}/x.jsonl", b_text)
+        self.assertNotIn(a_enc, b_text)
+
+    def test_absolute_context_dir_beats_bare_encoded(self):
+        # An absolute context-dir path must use the context-dir sentinel, not get
+        # split by the shorter encoded-dir tier.
+        a_enc = encode_project_dir(self.A_ROOT)
+        s = f"{self.A_HOME}/.claude/projects/{a_enc}/m.jsonl"
+        canon, _ = canonicalize_value_m(s, self._maps(self.A_HOME, self.A_ROOT))
+        self.assertIn(f"{SENTINEL_CONTEXT_DIR}/m.jsonl", canon)
+        self.assertNotIn(SENTINEL_ENCODED_DIR, canon)
 
     def test_context_dir_beats_home_tier(self):
         # The context-dir path must not be half-eaten by the shorter home anchor.

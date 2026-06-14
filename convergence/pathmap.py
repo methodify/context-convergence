@@ -40,8 +40,9 @@ DEFAULT_SENTINEL = "{{CC_PROJECT_ROOT}}"
 # most-specific to least; applied longest-anchor-first so specific beats general.
 SENTINEL_PROJECT_ROOT = "{{CC_PROJECT_ROOT}}"
 SENTINEL_CONTEXT_DIR = "{{CC_PROJECT_CONTEXT_DIR}}"  # <home>/.claude/projects/<encoded>
+SENTINEL_ENCODED_DIR = "{{CC_ENCODED_DIR}}"          # the bare <encoded> dir name
 SENTINEL_HOME = "{{CC_HOME}}"
-ALL_SENTINELS = (SENTINEL_CONTEXT_DIR, SENTINEL_PROJECT_ROOT, SENTINEL_HOME)
+ALL_SENTINELS = (SENTINEL_CONTEXT_DIR, SENTINEL_PROJECT_ROOT, SENTINEL_ENCODED_DIR, SENTINEL_HOME)
 
 # A leading alphanumeric would mean the root is the tail of a longer path run
 # (e.g. `/mnt/Users/.../catalog` — a different path that ends with our root).
@@ -129,15 +130,22 @@ def build_mappings(home: str, project_root: str, encoded_dir: str,
       2. <home>/.claude/projects/<enc> -> {{CC_PROJECT_CONTEXT_DIR}}  (the tool's
          own context dir; both home AND the lossy encoded segment change per
          machine, so it gets its own exact sentinel)
-      3. <home>                        -> {{CC_HOME}}  (optional; covers dotfiles,
+      3. <encoded_dir>                 -> {{CC_ENCODED_DIR}}  (the bare encoded
+         dir name, which appears standalone or inside tilde paths
+         `~/.claude/projects/<enc>` — common in memory files, where the absolute
+         context-dir tier doesn't reach)
+      4. <home>                        -> {{CC_HOME}}  (optional; covers dotfiles,
          other ~/.claude paths, and sibling projects by the ~/ convention)
 
-    Every machine builds this with its OWN home/root/encoded but the SAME policy,
-    so the canonical form is identical across machines.
+    Applied longest-first, so the absolute context-dir path wins over the bare
+    encoded name where both could match. Every machine builds this with its OWN
+    home/root/encoded but the SAME policy, so the canonical form is identical
+    across machines.
     """
     m: list[Mapping] = [
         (project_root, SENTINEL_PROJECT_ROOT),
         (f"{home}/.claude/projects/{encoded_dir}", SENTINEL_CONTEXT_DIR),
+        (encoded_dir, SENTINEL_ENCODED_DIR),
     ]
     if rewrite_home:
         m.append((home, SENTINEL_HOME))
