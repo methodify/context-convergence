@@ -19,9 +19,9 @@ import glob
 import os
 import sys
 
-from . import config, engine, hooks
+from . import config, engine, env, hooks
 from .doctor import format_report, scan
-from .pathmap import DEFAULT_SENTINEL, canonicalize_jsonl_root, localize_jsonl_root
+from .pathmap import DEFAULT_SENTINEL, canonicalize_jsonl_root, encode_project_dir, localize_jsonl_root
 
 
 def _adopt_default_remote(remote, cluster) -> bool:
@@ -215,8 +215,29 @@ def _cmd_status(args) -> int:
     return 0
 
 
+def _resolve_doctor_dir(arg) -> str:
+    """Resolve doctor's target context dir. No arg -> derive from cwd; a project
+    root -> derive its context dir; an actual ~/.claude/projects/<…> path -> use
+    as-is."""
+    cc = os.path.abspath(env.claude_projects_dir())
+    if arg is None:
+        root = os.path.abspath(os.getcwd())
+    else:
+        a = os.path.abspath(os.path.expanduser(arg))
+        if a == cc or a.startswith(cc + os.sep):   # already a context dir
+            return a
+        root = a                                   # treat as a project root
+    return os.path.join(cc, encode_project_dir(root))
+
+
 def _cmd_doctor(args) -> int:
-    rep = scan(args.context_dir, root=args.root, home=args.home,
+    ctx = _resolve_doctor_dir(args.context_dir)
+    if not os.path.isdir(ctx):
+        print(f"error: no Claude Code context dir at {ctx}\n"
+              f"  (run from your project dir, or pass the project root / context dir)",
+              file=sys.stderr)
+        return 2
+    rep = scan(ctx, root=args.root, home=args.home,
                rewrite_home=not args.no_rewrite_home, workers=args.workers)
     print(format_report(rep))
     return 0 if rep.ok else 1
@@ -327,7 +348,8 @@ def main(argv=None) -> int:
     hk.set_defaults(func=_cmd_hook)
 
     d = sub.add_parser("doctor", help="scan a context dir and report safety")
-    d.add_argument("context_dir")
+    d.add_argument("context_dir", nargs="?", default=None,
+                   help="project root, a ~/.claude/projects/<…> dir, or omit to use the cwd")
     d.add_argument("--root", default=None)
     d.add_argument("--home", default=None)
     d.add_argument("--no-rewrite-home", action="store_true")

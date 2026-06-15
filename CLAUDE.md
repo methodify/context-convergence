@@ -47,7 +47,7 @@ python3 -m convergence scan [project_root]                             # secret 
 python3 -m convergence hook install|uninstall|status [--event Stop|SessionEnd]
 
 # low-level path mapping (Sprint 0)
-python3 -m convergence doctor <context_dir>        # scan + safety report (infers root)
+python3 -m convergence doctor [project_root|context_dir]  # omit to use cwd; scan + safety report
 python3 -m convergence canonicalize <ctx_dir> <out_dir> [--root R]
 python3 -m convergence localize <in_dir> <ctx_dir> --root R   # R = target machine's root
 ```
