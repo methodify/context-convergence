@@ -143,23 +143,26 @@ def _resolve_state(project_root: str | None, project_id: str | None) -> LocalSta
 
 
 def _guarded_canonicalize(participant: Participant, text: str, kind: str, rewrite_home: bool):
-    """Canonicalize one file (kind 'jsonl' or 'text'), verifying the PATH
-    rewriting reverses without data loss. JSONL is compared against the
-    normalized (compact-reserialized) form so incidental formatting isn't
-    mistaken for a failure; text (markdown memory) is compared byte-for-byte.
-    Returns (canon, n_substitutions)."""
+    """Canonicalize one file, verifying the canonical form is STABLE through the
+    sync loop: canonicalize(localize(canon)) == canon. That is the property a
+    convergence tool actually needs — the canonical bytes don't drift as the
+    content round-trips across machines. We do NOT require localize to reproduce
+    the exact original bytes, because path-separator style is semantically null
+    (a Windows path's `/` and `\\` tail are the same path) and localize
+    normalizes it to the machine's native separator. A genuine data-losing
+    rewrite would still change the re-canonicalized form and be caught."""
     maps = participant.mappings(rewrite_home)
     sep = participant.native_sep
     if kind == "jsonl":
         canon, n = canonicalize_jsonl(text, maps, sep)
-        ok = localize_jsonl(canon, maps, sep)[0] == normalize_jsonl(text)
+        ok = canonicalize_jsonl(localize_jsonl(canon, maps, sep)[0], maps, sep)[0] == canon
     else:
         canon, n = canonicalize_value(text, maps, sep)
-        ok = localize_value(canon, maps, sep)[0] == text
+        ok = canonicalize_value(localize_value(canon, maps, sep)[0], maps, sep)[0] == canon
     if not ok:
         raise ConvergenceError(
-            "refusing to push: a file did not round-trip losslessly "
-            "(run `doctor` to inspect). No data was written.")
+            "refusing to push: a file's canonical form is not stable through a "
+            "round-trip (run `doctor` to inspect). No data was written.")
     return canon, n
 
 

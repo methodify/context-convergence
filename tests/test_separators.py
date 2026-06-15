@@ -60,6 +60,21 @@ class SeparatorTest(unittest.TestCase):
         canon, _ = WIN.canonicalize(doc)
         self.assertEqual(WIN.localize(canon)[0], normalize_jsonl(doc))  # lossless on Windows
 
+    def test_windows_mixed_separators_are_canonical_stable(self):
+        # Windows tools (cargo, git, rustc) emit forward slashes too, so real
+        # Windows paths are mixed. localize normalizes the tail to native `\`, so
+        # exact byte round-trip differs — but the CANONICAL form is stable, which
+        # is what the push guard requires. (This is the real-data doctor FAIL.)
+        root = "C:\\LocalData\\projects\\submatrix-rust"
+        win = Participant("w", "windows", "C:\\Users\\b", root)
+        text = json.dumps({"f": root + "/crates/cam/mod.rs"},  # FORWARD-slash tail
+                          separators=(",", ":")) + "\n"
+        canon, _ = win.canonicalize(text)
+        self.assertIn("{{CC_PROJECT_ROOT}}/crates/cam/mod.rs", canon)  # neutral canonical
+        local2, _ = win.localize(canon)
+        self.assertNotEqual(local2, normalize_jsonl(text))     # exact round-trip differs (benign)
+        self.assertEqual(win.canonicalize(local2)[0], canon)   # canonical IS stable (guard passes)
+
     def test_posix_unaffected(self):
         doc = _doc("/Users/bryon/src/submatrix-rust", "/")
         canon, _ = MAC.canonicalize(doc)

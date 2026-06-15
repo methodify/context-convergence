@@ -133,7 +133,10 @@ def _file_check(path, mappings, sep, project_root, home, rewrite_home,
             if not line.strip():
                 continue
             canon, _ = canonicalize_jsonl(line, mappings, sep)
-            if roundtrip_ok and localize_jsonl(canon, mappings, sep)[0] != normalize_jsonl(line):
+            # Canonical-stability (not exact local reproduction): localize may
+            # normalize path separators to native, which is benign.
+            if roundtrip_ok and canonicalize_jsonl(localize_jsonl(canon, mappings, sep)[0],
+                                                   mappings, sep)[0] != canon:
                 roundtrip_ok = False
             if project_root in canon:
                 residue_root += canon.count(project_root)

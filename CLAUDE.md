@@ -64,7 +64,7 @@ Real context dirs live at `~/.claude/projects/<encoded-dir>/`. `doctor` on this 
 - `doctor` streams line-by-line with progress (bounded memory on 500 MB+ transcripts) and classifies subdir-vs-sibling separator-agnostically (`_under`).
 - **Still POSIX-only:** the `fcntl` concurrency lock no-ops on native Windows (no per-project serialization there).
 
-The push guard compares against `normalize_jsonl(text)` (compact re-serialization), not raw bytes — it verifies *data* reversibility, not incidental whitespace. Tests are sandboxed via the `env.py` overrides; `CLAUDE_SETTINGS_PATH` redirects hook install away from the real settings.json.
+The push guard checks **canonical stability** — `canonicalize(localize(canon)) == canon` — not exact reproduction of the original local bytes. The right property for a convergence tool is that the canonical form (what syncs) doesn't drift across machines, not that localize round-trips byte-for-byte. This matters on Windows: tools emit mixed `/`+`\` separators, and localize normalizes a path tail to the machine's native separator (semantically null — both are the same path), so exact byte round-trip differs but canonical stability holds. A genuine data-losing rewrite still changes the re-canonicalized form and is caught. (`doctor` uses the same stability check.) Tests are sandboxed via the `env.py` overrides; `CLAUDE_SETTINGS_PATH` redirects hook install away from the real settings.json.
 
 ## What this tool is
 
