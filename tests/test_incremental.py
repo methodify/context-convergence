@@ -78,6 +78,20 @@ class LocalIncrementalTest(unittest.TestCase):
         self.assertEqual(r["files"], 2)        # all reprocessed despite matching fingerprints
         self.assertEqual(r["skipped"], 0)
 
+    def test_windows_backslash_fingerprints_migrate_and_skip(self):
+        # Simulate state written by an older Windows build: the memory relpath
+        # key uses `\`. After the relpath fix entries are forward-slash, so a
+        # naive lookup misses and the (unchanged) memory file looks "changed".
+        # load() must migrate the key so it still skips.
+        st = LocalState.load("demo")
+        fps = dict(st.file_fingerprints)
+        fps["memory\\MEMORY.md"] = fps.pop("memory/MEMORY.md")
+        st.file_fingerprints = fps
+        st.save()
+        r = engine.push(project_id="demo")
+        self.assertEqual(r["files"], 0)        # nothing reprocessed — migration worked
+        self.assertEqual(r["skipped"], 2)
+
     def test_exists_guard_reprocesses_when_cluster_file_missing(self):
         # Fingerprint matches, but the cluster lost the file (wipe/re-clone) — must
         # not skip, or the file would be missing from the cluster forever.

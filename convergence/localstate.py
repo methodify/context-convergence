@@ -47,6 +47,14 @@ class LocalState:
     def load(cls, project_id: str) -> "LocalState | None":
         try:
             with open(cls.path_for(project_id), encoding="utf-8") as fh:
-                return cls(**json.load(fh))
+                st = cls(**json.load(fh))
         except FileNotFoundError:
             return None
+        # Migrate state written by an older Windows build: relpaths (and thus
+        # fingerprint keys) used `\`; they are forward-slash now. Without this,
+        # every memory file looks "changed" after the upgrade (key miss) even
+        # though its canonical content is identical to the cluster's.
+        if st.file_fingerprints and any("\\" in k for k in st.file_fingerprints):
+            st.file_fingerprints = {k.replace("\\", "/"): v
+                                    for k, v in st.file_fingerprints.items()}
+        return st
