@@ -136,12 +136,13 @@ def _guarded_canonicalize(participant: Participant, text: str, kind: str, rewrit
     mistaken for a failure; text (markdown memory) is compared byte-for-byte.
     Returns (canon, n_substitutions)."""
     maps = participant.mappings(rewrite_home)
+    sep = participant.native_sep
     if kind == "jsonl":
-        canon, n = canonicalize_jsonl(text, maps)
-        ok = localize_jsonl(canon, maps)[0] == normalize_jsonl(text)
+        canon, n = canonicalize_jsonl(text, maps, sep)
+        ok = localize_jsonl(canon, maps, sep)[0] == normalize_jsonl(text)
     else:
-        canon, n = canonicalize_value(text, maps)
-        ok = localize_value(canon, maps)[0] == text
+        canon, n = canonicalize_value(text, maps, sep)
+        ok = localize_value(canon, maps, sep)[0] == text
     if not ok:
         raise ConvergenceError(
             "refusing to push: a file did not round-trip losslessly "
@@ -151,7 +152,8 @@ def _guarded_canonicalize(participant: Participant, text: str, kind: str, rewrit
 
 def _localize_entry(participant: Participant, text: str, kind: str, rewrite_home: bool):
     maps = participant.mappings(rewrite_home)
-    return localize_jsonl(text, maps) if kind == "jsonl" else localize_value(text, maps)
+    sep = participant.native_sep
+    return localize_jsonl(text, maps, sep) if kind == "jsonl" else localize_value(text, maps, sep)
 
 
 def _localize_into_local(transport, participant, encoded, rewrite_home):
@@ -491,6 +493,7 @@ def _status(st) -> dict:
     local_entries = dict(_context_entries(st.encoded_dir))   # relpath -> kind
     cluster_files = set(cluster.context_files())
     maps = participant.mappings(roster.rewrite_home) if participant else None
+    sep = participant.native_sep if participant else "/"
 
     dirty = []
     for relpath, kind in local_entries.items():
@@ -499,11 +502,11 @@ def _status(st) -> dict:
         elif maps:
             remote_text = cluster.read_context(relpath)
             if kind == "jsonl":
-                canon = canonicalize_jsonl(_read(os.path.join(base, relpath)), maps)[0]
+                canon = canonicalize_jsonl(_read(os.path.join(base, relpath)), maps, sep)[0]
                 if union_jsonl(remote_text, canon) != remote_text:
                     dirty.append(relpath)
             else:
-                canon = canonicalize_value(_read(os.path.join(base, relpath)), maps)[0]
+                canon = canonicalize_value(_read(os.path.join(base, relpath)), maps, sep)[0]
                 if canon != remote_text:
                     dirty.append(relpath)
     behind = [n for n in cluster_files if n not in local_entries]

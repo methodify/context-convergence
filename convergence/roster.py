@@ -17,6 +17,7 @@ from .pathmap import (
     canonicalize_jsonl,
     encode_project_dir,
     localize_jsonl,
+    native_sep,
 )
 
 
@@ -41,14 +42,20 @@ class Participant:
         Computed (encoding is one-way) — never decoded. See pathmap §1."""
         return encode_project_dir(self.project_root)
 
+    @property
+    def native_sep(self) -> str:
+        """This machine's path separator (`\\` on Windows, else `/`), used to
+        normalize path tails to/from the canonical `/`."""
+        return native_sep(self.os)
+
     def mappings(self, rewrite_home: bool = True):
         return build_mappings(self.home, self.project_root, self.encoded_dir, rewrite_home)
 
     def canonicalize(self, text: str, rewrite_home: bool = True) -> tuple[str, int]:
-        return canonicalize_jsonl(text, self.mappings(rewrite_home))
+        return canonicalize_jsonl(text, self.mappings(rewrite_home), self.native_sep)
 
     def localize(self, text: str, rewrite_home: bool = True) -> tuple[str, int]:
-        return localize_jsonl(text, self.mappings(rewrite_home))
+        return localize_jsonl(text, self.mappings(rewrite_home), self.native_sep)
 
     def to_dict(self) -> dict:
         return {

@@ -130,6 +130,7 @@ def scan(context_dir, root=None, home=None, rewrite_home=True, progress=True) ->
 
     participant = Participant("local", env.detected_os(), rep.home, rep.project_root)
     mappings = participant.mappings(rewrite_home)
+    sep = participant.native_sep
     context_anchor = f"{rep.home}/.claude/projects/{participant.encoded_dir}"
 
     # Pass 2: round-trip + residue + tier coverage, streaming line by line so a
@@ -145,8 +146,8 @@ def scan(context_dir, root=None, home=None, rewrite_home=True, progress=True) ->
             for line in fh:
                 if not line.strip():
                     continue
-                canon, _ = canonicalize_jsonl(line, mappings)
-                if roundtrip_ok and localize_jsonl(canon, mappings)[0] != normalize_jsonl(line):
+                canon, _ = canonicalize_jsonl(line, mappings, sep)
+                if roundtrip_ok and localize_jsonl(canon, mappings, sep)[0] != normalize_jsonl(line):
                     roundtrip_ok = False
                 if rep.project_root in canon:
                     rep.residue_root += canon.count(rep.project_root)

@@ -48,6 +48,29 @@ ALL_SENTINELS = (SENTINEL_CONTEXT_DIR, SENTINEL_PROJECT_ROOT, SENTINEL_ENCODED_D
 # (e.g. `/mnt/Users/.../catalog` — a different path that ends with our root).
 _LEADING_TOKEN_CHARS = r"A-Za-z0-9"
 
+# The path tail after an anchor: runs of (separator + a path-name segment).
+# Captured so its separators can be normalized between platforms (canonical form
+# uses `/`). The segment class is deliberately RESTRICTIVE — only characters that
+# are unambiguously part of a filename — so the greedy tail never consumes across
+# a token boundary (`(`, `,`, `=`, a quote, …) and swallows the next path. Worst
+# case it stops early at an unusual filename char, which is harmless: anything
+# past the last captured separator has no separator to normalize.
+_TAIL = r"((?:[\\/][A-Za-z0-9._~+-]*)*)"
+
+
+def native_sep(os_name: str) -> str:
+    return "\\" if os_name == "windows" else "/"
+
+
+def _to_canonical_seps(tail: str, src_sep: str) -> str:
+    # Normalize a path tail to the canonical `/` (only Windows differs).
+    return tail.replace("\\", "/") if src_sep == "\\" else tail
+
+
+def _from_canonical_seps(tail: str, dst_sep: str) -> str:
+    # Convert a canonical `/` tail to the target machine's native separator.
+    return tail.replace("/", "\\") if dst_sep == "\\" else tail
+
 _JSON_DUMP = dict(ensure_ascii=False, separators=(",", ":"))
 
 
@@ -115,6 +138,7 @@ def _boundary_pattern(root: str) -> re.Pattern[str]:
         + re.escape(root)
         + r"(?![A-Za-z0-9_-])"      # not a name-continuation character
         + r"(?!\.[A-Za-z0-9])"      # not an extension dot (allow trailing period)
+        + _TAIL                     # consume the path tail so we can normalize seps
     )
 
 
@@ -152,26 +176,32 @@ def build_mappings(home: str, project_root: str, encoded_dir: str,
     return sorted(m, key=lambda t: len(t[0]), reverse=True)
 
 
-def canonicalize_value(s: str, mappings: list[Mapping]) -> tuple[str, int]:
+def canonicalize_value(s: str, mappings: list[Mapping], src_sep: str = "/") -> tuple[str, int]:
     """Canonicalize one decoded string value against an ordered mapping set.
     Escapes any literal sentinels first, then boundary-replaces each anchor
-    (longest first). Returns (value, n_substitutions)."""
+    (longest first), normalizing the matched path tail's separators from the
+    source machine's native sep to canonical `/`. Returns (value, n)."""
     s = _escape_literals_multi(s, [sent for _, sent in mappings])
     n = 0
     for anchor, sentinel in mappings:
-        s, c = _boundary_pattern(anchor).subn(sentinel, s)
+        def repl(m, sent=sentinel):
+            return sent + _to_canonical_seps(m.group(1), src_sep)
+        s, c = _boundary_pattern(anchor).subn(repl, s)
         n += c
     return s, n
 
 
-def localize_value(s: str, mappings: list[Mapping]) -> tuple[str, int]:
+def localize_value(s: str, mappings: list[Mapping], dst_sep: str = "/") -> tuple[str, int]:
     """Inverse of canonicalize_value: expand each real (zero-`_LIT`) sentinel to
-    its anchor, then restore escaped literal sentinels."""
+    its anchor, converting the canonical `/` tail to the target machine's native
+    separator, then restore escaped literal sentinels."""
     n = 0
     for anchor, sentinel in mappings:
         base, close = _sentinel_parts(sentinel)
-        exact = re.compile(re.escape(base) + r"(?!_LIT)" + re.escape(close))
-        s, c = exact.subn(lambda _m, a=anchor: a, s)  # a=: bind; anchors may hold \
+        exact = re.compile(re.escape(base) + r"(?!_LIT)" + re.escape(close) + _TAIL)
+        def repl(m, a=anchor):  # a=: bind; anchors may hold backslashes
+            return a + _from_canonical_seps(m.group(1), dst_sep)
+        s, c = exact.subn(repl, s)
         n += c
     s = _unescape_literals_multi(s, [sent for _, sent in mappings])
     return s, n
@@ -193,13 +223,13 @@ def _single(root: str, sentinel: str) -> list[Mapping]:
     return [(root, sentinel)]
 
 
-def canonicalize_value_root(s, root, sentinel=DEFAULT_SENTINEL):
+def canonicalize_value_root(s, root, sentinel=DEFAULT_SENTINEL, src_sep="/"):
     """Single-anchor convenience (root only) used by lower-level callers/tests."""
-    return canonicalize_value(s, _single(root, sentinel))
+    return canonicalize_value(s, _single(root, sentinel), src_sep)
 
 
-def localize_value_root(s, root, sentinel=DEFAULT_SENTINEL):
-    return localize_value(s, _single(root, sentinel))
+def localize_value_root(s, root, sentinel=DEFAULT_SENTINEL, dst_sep="/"):
+    return localize_value(s, _single(root, sentinel), dst_sep)
 
 
 # --------------------------------------------------------------------------- #
@@ -255,14 +285,14 @@ def _transform_jsonl(text: str, fn) -> tuple[str, int]:
     return "".join(out_lines), total
 
 
-def canonicalize_jsonl(text: str, mappings: list[Mapping]) -> tuple[str, int]:
+def canonicalize_jsonl(text: str, mappings: list[Mapping], src_sep: str = "/") -> tuple[str, int]:
     """Canonicalize a full JSONL document (local form -> canonical form)."""
-    return _transform_jsonl(text, lambda s: canonicalize_value(s, mappings))
+    return _transform_jsonl(text, lambda s: canonicalize_value(s, mappings, src_sep))
 
 
-def localize_jsonl(text: str, mappings: list[Mapping]) -> tuple[str, int]:
+def localize_jsonl(text: str, mappings: list[Mapping], dst_sep: str = "/") -> tuple[str, int]:
     """Localize a full JSONL document (canonical form -> local form)."""
-    return _transform_jsonl(text, lambda s: localize_value(s, mappings))
+    return _transform_jsonl(text, lambda s: localize_value(s, mappings, dst_sep))
 
 
 def canonicalize_jsonl_root(text, root, sentinel=DEFAULT_SENTINEL):
