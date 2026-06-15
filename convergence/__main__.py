@@ -1,15 +1,17 @@
-"""convergence CLI.
+"""converge CLI (installed as `converge`; `convergence` and `python -m
+convergence` remain as aliases).
 
-Sync verbs (Sprint 1 — local cluster dir, single machine):
-    python -m convergence init <project_root> --cluster <dir> [--project-id ID]
-    python -m convergence push   [project_root] [--project-id ID]
-    python -m convergence pull   [project_root] [--project-id ID]
-    python -m convergence status [project_root] [--project-id ID]
+Everyday verbs:
+    converge init <project_root> [--remote URL] [--project-id ID]
+    converge join <project_root> [--remote URL]
+    converge sync   [project_root]      # pull then push
+    converge status [project_root]
+    converge upgrade                    # self-update from source
 
-Low-level path-mapping (Sprint 0 — operate on a context dir directly):
-    python -m convergence doctor <context_dir> [--root R] [--home H]
-    python -m convergence canonicalize <context_dir> <out_dir> [--root R]
-    python -m convergence localize <in_dir> <context_dir> --root R
+Low-level path-mapping (operate on a context dir directly):
+    converge doctor [context_dir] [--root R] [--home H]
+    converge canonicalize <context_dir> <out_dir> [--root R]
+    converge localize <in_dir> <context_dir> --root R
 """
 
 from __future__ import annotations
@@ -17,11 +19,16 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import subprocess
 import sys
 
 from . import config, engine, env, gitutil, hooks
 from .doctor import format_report, scan
 from .pathmap import DEFAULT_SENTINEL, canonicalize_jsonl_root, encode_project_dir, localize_jsonl_root
+
+# Where `converge upgrade` pulls new code from. We aren't version-tagging yet, so
+# the install must be FORCED (pip would otherwise see the same 0.1.0 and no-op).
+UPGRADE_REPO = "git+https://github.com/methodify/context-convergence.git"
 
 
 def _adopt_default_remote(remote, cluster) -> bool:
@@ -189,6 +196,31 @@ def _cmd_scan(args) -> int:
     return 1
 
 
+def _cmd_upgrade(args) -> int:
+    """Self-update from the source repo via pip (forced — we don't version-tag
+    yet, so pip would otherwise see an unchanged 0.1.0 and do nothing). --no-deps
+    keeps it from disturbing anything else; the package has zero runtime deps."""
+    url = args.url or UPGRADE_REPO
+    if args.ref:
+        url = f"{url}@{args.ref}"
+    cmd = [sys.executable, "-m", "pip", "install",
+           "--upgrade", "--force-reinstall", "--no-deps", url]
+    print("converge upgrade: reinstalling from source (unversioned → forced)")
+    print("  $ " + " ".join(cmd))
+    if args.dry_run:
+        print("(dry run — nothing installed)")
+        return 0
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"error: upgrade failed (pip exited {e.returncode}).\n"
+              f"  If you installed with pipx, run instead:\n"
+              f"    pipx install --force {url}", file=sys.stderr)
+        return 1
+    print("upgraded. run `converge --help` to confirm.")
+    return 0
+
+
 def _cmd_hook_sync(args) -> int:
     return hooks.hook_sync(args.project_root)
 
@@ -316,7 +348,7 @@ def _cmd_localize(args) -> int:
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="convergence", description=__doc__)
+    p = argparse.ArgumentParser(prog="converge", description=__doc__)
     p.add_argument("--sentinel", default=DEFAULT_SENTINEL)
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -370,6 +402,12 @@ def main(argv=None) -> int:
             sp.add_argument("--dry-run", action="store_true",
                             help="show what would happen; change nothing")
         sp.set_defaults(func=fn)
+
+    up = sub.add_parser("upgrade", help="self-update the package from source (forced; we're unversioned)")
+    up.add_argument("--ref", default=None, help="git branch/tag/sha to install (default: repo default branch)")
+    up.add_argument("--url", default=None, help=f"source URL (default: {UPGRADE_REPO})")
+    up.add_argument("--dry-run", action="store_true", help="print the pip command; install nothing")
+    up.set_defaults(func=_cmd_upgrade)
 
     hs = sub.add_parser("hook-sync", help="(internal) soft-failing sync for the Stop hook")
     hs.add_argument("project_root", nargs="?", default=None)

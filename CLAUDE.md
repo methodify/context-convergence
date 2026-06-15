@@ -46,6 +46,13 @@ python3 -m convergence push|pull|sync|status [project_root] [--project-id ID]
 python3 -m convergence push <project_root> --scan-secrets [--strict]   # opt-in secret scan
 python3 -m convergence scan [project_root]                             # secret scan, no sync
 python3 -m convergence hook install|uninstall|status [--event Stop|SessionEnd]
+python3 -m convergence upgrade [--ref BRANCH|TAG] [--dry-run]   # self-update from source (forced — unversioned)
+
+# Installed console script is `converge` (with `convergence` kept as an alias).
+# Bootstrapping a machine / first upgrade is a raw pip install (the installed
+# build predates the upgrade verb); thereafter `converge upgrade` self-updates:
+#   pip install --upgrade --force-reinstall --no-deps \
+#       git+https://github.com/methodify/context-convergence.git
 
 # low-level path mapping (Sprint 0)
 python3 -m convergence doctor [project_root|context_dir]  # omit to use cwd; scan + safety report

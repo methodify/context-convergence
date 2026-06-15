@@ -15,10 +15,11 @@ keywords = ["claude-code", "context", "sync", "multi-machine"]
 dependencies = []
 
 [project.scripts]
-convergence = "convergence.__main__:main"
+converge = "convergence.__main__:main"
+convergence = "convergence.__main__:main"  # legacy alias for the longer name
 
 [project.urls]
-Homepage = "https://github.com/"  # set to the private repo when published
+Homepage = "https://github.com/methodify/context-convergence"
 
 [tool.setuptools]
 packages = ["convergence"]
