@@ -135,7 +135,9 @@ class EngineTest(unittest.TestCase):
         # Wipe local, then pull from cluster: single machine -> identity.
         os.remove(os.path.join(self.ctx_dir, "sess.jsonl"))
         r = engine.pull(project_id="demo")
-        self.assertEqual(r["files"], 2)  # sess.jsonl + memory/note.md
+        # Only the wiped file is written; the still-identical memory note is left
+        # untouched (pull no longer rewrites files whose content already matches).
+        self.assertEqual(r["files"], 1)  # just the restored sess.jsonl
         restored = _slurp(os.path.join(self.ctx_dir, "sess.jsonl"))
         self.assertEqual(restored, self.original)
 

@@ -92,6 +92,18 @@ class LocalIncrementalTest(unittest.TestCase):
         self.assertEqual(r["files"], 0)        # nothing reprocessed — migration worked
         self.assertEqual(r["skipped"], 2)
 
+    def test_sync_converges_no_self_push_loop(self):
+        # Editing a file then syncing must converge: a SECOND sync re-pushes and
+        # re-pulls nothing. Regression — pull localized the files this machine had
+        # just pushed, churning their mtime, so every sync re-pushed them forever.
+        with open(self.sess, "a") as fh:
+            fh.write(_jsonl({"turn": "more"}))
+        r1 = engine.sync_full(project_id="demo")
+        self.assertEqual(r1["pushed"], 1)
+        r2 = engine.sync_full(project_id="demo")
+        self.assertEqual(r2["pushed"], 0)   # converged: no self-push loop
+        self.assertEqual(r2["pulled"], 0)
+
     def test_exists_guard_reprocesses_when_cluster_file_missing(self):
         # Fingerprint matches, but the cluster lost the file (wipe/re-clone) — must
         # not skip, or the file would be missing from the cluster forever.
@@ -156,6 +168,23 @@ class GitIncrementalTest(unittest.TestCase):
         r = engine.pull(project_root=self.B)
         self.assertEqual(r["files"], 1)                    # incremental: just sessNEW
         self.assertIn("sessNEW.jsonl", self._names(self.B))
+
+    def test_repeated_sync_over_git_is_a_noop(self):
+        # The user's exact scenario: one machine, real remote. After a sync that
+        # pushes work, the next sync must do nothing — pull must not re-localize
+        # (and thus re-dirty) the files this machine just pushed.
+        self._use("A", "mach-A")
+        self._seed(self.A, "sessA.jsonl")
+        engine.init(self.A, remote=self.remote)
+        self._seed(self.A, "sessNEW.jsonl")
+        r1 = engine.sync(project_root=self.A)
+        self.assertEqual(r1["pushed"], 1)
+        r2 = engine.sync(project_root=self.A)
+        self.assertEqual(r2["pushed"], 0)
+        self.assertEqual(r2["pulled"], 0)
+        # And dry-run now agrees there's nothing to do.
+        r3 = engine.sync_full(project_root=self.A, dry_run=True)
+        self.assertEqual(r3["push_changed"], [])
 
     def test_full_convergence_loop_with_incremental(self):
         # The separate pull-baseline must be right, or B's sessions never reach A.

@@ -175,10 +175,23 @@ def _localize_entry(participant: Participant, text: str, kind: str, rewrite_home
     return localize_jsonl(text, maps, sep) if kind == "jsonl" else localize_value(text, maps, sep)
 
 
+def _same_local_file(path: str, text: str) -> bool:
+    """True if `path` already holds exactly `text`. Tolerant: an unreadable or
+    non-UTF-8 file counts as different, so pull overwrites (fixes) it."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read() == text
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
 def _localize_into_local(transport, participant, encoded, rewrite_home, relpaths=None):
     """Localize cluster files into the local context dir, preserving relative
     structure. `relpaths=None` means every file (full pull); otherwise only the
-    given subset (incremental pull — what git says changed)."""
+    given subset (incremental pull — what git says changed). Returns the count of
+    files ACTUALLY written — a target whose localized form already matches the
+    local file is left untouched (no mtime churn), so localizing this machine's
+    own just-pushed files is a no-op rather than a write that re-marks them dirty."""
     local_dir = _local_context_dir(encoded)
     targets = transport.cluster.context_files() if relpaths is None else relpaths
     n_files = n_subs = 0
@@ -187,7 +200,10 @@ def _localize_into_local(transport, participant, encoded, rewrite_home, relpaths
         if text is None:  # listed as changed but absent (deletion) — skip, never delete local
             continue
         text, n = _localize_entry(participant, text, _kind_of(relpath), rewrite_home)
-        _atomic_write(os.path.join(local_dir, relpath), text)
+        dest = os.path.join(local_dir, relpath)
+        if _same_local_file(dest, text):
+            continue  # already byte-identical — don't churn its mtime or count it
+        _atomic_write(dest, text)
         n_files += 1
         n_subs += n
     return n_files, n_subs
@@ -528,6 +544,19 @@ def _pull(st, full=False, dry_run=False) -> dict:
     backup = _backup_local_context(st.encoded_dir, relpaths)
     n_files, n_subs = _localize_into_local(transport, participant,
                                            st.encoded_dir, roster.rewrite_home, relpaths)
+    # Localizing can rewrite a file on disk (path rewrite / separator
+    # normalization bumps its mtime). Refresh the push fingerprints for EXACTLY
+    # the files we localized, so the next push doesn't see its own just-pulled
+    # files as "changed" and re-push them — which made every sync churn forever.
+    # Only the localized set: an untouched local-ahead edit must still look dirty.
+    localized = transport.cluster.context_files() if relpaths is None else relpaths
+    local_dir = _local_context_dir(st.encoded_dir)
+    fps = dict(st.file_fingerprints or {})
+    for rel in localized:
+        p = os.path.join(local_dir, rel)
+        if os.path.exists(p):
+            fps[rel] = _fingerprint(p)
+    st.file_fingerprints = fps
     st.last_converged = env.now_iso()
     st.last_converged_commit = head
     st.last_localized_commit = head
