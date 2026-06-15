@@ -204,14 +204,24 @@ def build_mappings(home: str, project_root: str, encoded_dir: str,
     return sorted(m, key=lambda t: len(t[0]), reverse=True)
 
 
+_SENTINEL_PROBE = "{{CC_"  # all sentinels start with this; gate the escape passes
+
+
 def canonicalize_value(s: str, mappings: list[Mapping], src_sep: str = "/") -> tuple[str, int]:
     """Canonicalize one decoded string value against an ordered mapping set.
     Escapes any literal sentinels first, then boundary-replaces each anchor
     (longest first), normalizing the matched path tail's separators from the
-    source machine's native sep to canonical `/`. Returns (value, n)."""
-    s = _escape_literals_multi(s, [sent for _, sent in mappings])
+    source machine's native sep to canonical `/`. Returns (value, n).
+
+    Cheap substring pre-checks gate every regex: a value that doesn't contain a
+    given anchor (or any sentinel) skips that scan entirely — most string values
+    mention at most one anchor, so this avoids the bulk of the regex work."""
+    if _SENTINEL_PROBE in s:
+        s = _escape_literals_multi(s, [sent for _, sent in mappings])
     n = 0
     for anchor, sentinel in mappings:
+        if anchor not in s:           # a substring miss is a guaranteed regex miss
+            continue
         def repl(m, sent=sentinel):
             return sent + _to_canonical_seps(m.group(1), src_sep)
         s, c = _boundary_pattern(anchor).subn(repl, s)
@@ -223,8 +233,12 @@ def localize_value(s: str, mappings: list[Mapping], dst_sep: str = "/") -> tuple
     """Inverse of canonicalize_value: expand each real (zero-`_LIT`) sentinel to
     its anchor, converting the canonical `/` tail to the target machine's native
     separator, then restore escaped literal sentinels."""
+    if _SENTINEL_PROBE not in s:      # no sentinels at all -> nothing to localize
+        return s, 0
     n = 0
     for anchor, sentinel in mappings:
+        if sentinel[:-2] not in s:    # sentinel base absent -> skip
+            continue
         def repl(m, a=anchor):  # a=: bind; anchors may hold backslashes
             return a + _from_canonical_seps(m.group(1), dst_sep)
         s, c = _exact_sentinel(sentinel).subn(repl, s)
