@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from functools import lru_cache
 
 # Bump whenever the canonicalization logic changes (encoding, mappings, sentinel
 # scheme, separator handling, ...). Stored in local state; a mismatch forces a
@@ -103,6 +104,28 @@ def _sentinel_parts(sentinel: str) -> tuple[str, str]:
     return sentinel[:-2], "}}"  # (open_base, close)
 
 
+# All the compiled regexes below depend ONLY on a constant anchor/sentinel
+# string, but they're applied to every string value in a transcript (hundreds of
+# thousands per file). Memoize them — recompiling per value (with re.escape on
+# the hot path) was the dominant cost (~13s of 17s on a 36MB file).
+@lru_cache(maxsize=512)
+def _escape_family(sentinel: str):
+    base, close = _sentinel_parts(sentinel)
+    return re.compile(re.escape(base) + r"((?:_LIT)*)" + re.escape(close)), base, close
+
+
+@lru_cache(maxsize=512)
+def _unescape_family(sentinel: str):
+    base, close = _sentinel_parts(sentinel)
+    return re.compile(re.escape(base) + r"((?:_LIT)+)" + re.escape(close)), base, close
+
+
+@lru_cache(maxsize=512)
+def _exact_sentinel(sentinel: str):
+    base, close = _sentinel_parts(sentinel)
+    return re.compile(re.escape(base) + r"(?!_LIT)" + re.escape(close) + _TAIL)
+
+
 def _escape_literals(text: str, sentinel: str) -> str:
     """Lift any pre-existing sentinel-family token one level so localize can
     restore it: `{{S}}` -> `{{S_LIT}}`, `{{S_LIT}}` -> `{{S_LIT_LIT}}`, ... The
@@ -110,8 +133,7 @@ def _escape_literals(text: str, sentinel: str) -> str:
     regress-free. Needed because this project's own context contains the
     sentinel string verbatim.
     """
-    base, close = _sentinel_parts(sentinel)
-    fam = re.compile(re.escape(base) + r"((?:_LIT)*)" + re.escape(close))
+    fam, base, close = _escape_family(sentinel)
     return fam.sub(lambda m: base + m.group(1) + "_LIT" + close, text)
 
 
@@ -119,14 +141,14 @@ def _unescape_literals(text: str, sentinel: str) -> str:
     """Inverse of _escape_literals: lower escaped family members one level.
     Zero-`_LIT` members are left alone (those are real, root-derived sentinels,
     already expanded to the root before this runs)."""
-    base, close = _sentinel_parts(sentinel)
-    fam = re.compile(re.escape(base) + r"((?:_LIT)+)" + re.escape(close))
+    fam, base, close = _unescape_family(sentinel)
     return fam.sub(lambda m: base + m.group(1)[len("_LIT"):] + close, text)
 
 
 # --------------------------------------------------------------------------- #
 # String-value primitives (operate on a single DECODED string)
 # --------------------------------------------------------------------------- #
+@lru_cache(maxsize=512)
 def _boundary_pattern(root: str) -> re.Pattern[str]:
     """Match `root` only where it stands as a whole path prefix.
 
@@ -203,11 +225,9 @@ def localize_value(s: str, mappings: list[Mapping], dst_sep: str = "/") -> tuple
     separator, then restore escaped literal sentinels."""
     n = 0
     for anchor, sentinel in mappings:
-        base, close = _sentinel_parts(sentinel)
-        exact = re.compile(re.escape(base) + r"(?!_LIT)" + re.escape(close) + _TAIL)
         def repl(m, a=anchor):  # a=: bind; anchors may hold backslashes
             return a + _from_canonical_seps(m.group(1), dst_sep)
-        s, c = exact.subn(repl, s)
+        s, c = _exact_sentinel(sentinel).subn(repl, s)
         n += c
     s = _unescape_literals_multi(s, [sent for _, sent in mappings])
     return s, n
