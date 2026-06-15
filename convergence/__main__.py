@@ -215,7 +215,7 @@ def _cmd_status(args) -> int:
 
 def _cmd_doctor(args) -> int:
     rep = scan(args.context_dir, root=args.root, home=args.home,
-               rewrite_home=not args.no_rewrite_home)
+               rewrite_home=not args.no_rewrite_home, workers=args.workers)
     print(format_report(rep))
     return 0 if rep.ok else 1
 
@@ -325,6 +325,8 @@ def main(argv=None) -> int:
     d.add_argument("--root", default=None)
     d.add_argument("--home", default=None)
     d.add_argument("--no-rewrite-home", action="store_true")
+    d.add_argument("--workers", type=int, default=None,
+                   help="parallel file workers (default: CPU count; 1 = sequential)")
     d.set_defaults(func=_cmd_doctor)
 
     c = sub.add_parser("canonicalize", help="local form -> canonical form")
