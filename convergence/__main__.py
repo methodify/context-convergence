@@ -19,7 +19,7 @@ import glob
 import os
 import sys
 
-from . import config, engine, env, hooks
+from . import config, engine, env, gitutil, hooks
 from .doctor import format_report, scan
 from .pathmap import DEFAULT_SENTINEL, canonicalize_jsonl_root, encode_project_dir, localize_jsonl_root
 
@@ -375,6 +375,28 @@ def main(argv=None) -> int:
     except engine.ConvergenceError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    except gitutil.GitError as e:
+        print(f"error: {_git_error_hint(e)}", file=sys.stderr)
+        return 1
+
+
+def _git_error_hint(e) -> str:
+    """Turn a raw git failure into a clear, actionable one line (no traceback)."""
+    text = str(e)
+    low = text.lower()
+    if "not found" in low or "does not exist" in low:
+        return ("cluster remote not found — check the URL for typos, and make sure the "
+                "repo exists (create an empty private repo first if it doesn't)")
+    if any(k in low for k in ("authentication failed", "could not read username",
+                              "permission denied", "access denied", "403 forbidden")):
+        return ("could not authenticate to the cluster remote — if it's private, set up "
+                "SSH or a personal access token for git")
+    if any(k in low for k in ("could not resolve host", "unable to access", "couldn't connect",
+                              "connection timed out", "network is unreachable")):
+        return "could not reach the cluster remote — check your network and the URL"
+    # Fall back to git's own last meaningful line.
+    lines = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("git ")]
+    return f"git: {lines[-1].strip()}" if lines else text
 
 
 if __name__ == "__main__":
