@@ -40,7 +40,7 @@ from functools import lru_cache
 # scheme, separator handling, ...). Stored in local state; a mismatch forces a
 # full re-process so incremental sync never serves stale-canonical files after an
 # upgrade. (This is the encoded-dir-tier upgrade case, made automatic.)
-CANON_VERSION = 1
+CANON_VERSION = 2  # v2: Windows anchors match C:\ / C:/ / /c/ dialects, case-insensitively
 
 DEFAULT_SENTINEL = "{{CC_PROJECT_ROOT}}"
 # The three rewrite tiers (cluster-wide policy; see build_mappings). Ordered here
@@ -148,8 +148,34 @@ def _unescape_literals(text: str, sentinel: str) -> str:
 # --------------------------------------------------------------------------- #
 # String-value primitives (operate on a single DECODED string)
 # --------------------------------------------------------------------------- #
+def _windows_anchor_regex(root: str) -> str:
+    """A separator- and case-tolerant regex BODY for a Windows anchor, matching
+    every dialect real Windows tooling emits for the same path:
+
+      - `C:\\LocalData\\...`  native backslash (Claude Code's own cwd fields)
+      - `C:/LocalData/...`    forward slash    (cargo / rustc / many CLIs)
+      - `/c/LocalData/...`    msys mount       (git-bash)
+
+    On a Rust/Windows project the native form is a tiny minority (measured: 14 of
+    3251 own-root refs), so anchoring only on it — as a plain re.escape did —
+    left ~99.6% of the project's own paths un-canonicalized. Windows paths are
+    also case-insensitive, so the pattern is compiled with re.IGNORECASE. The tail
+    after the anchor is handled by `_TAIL` (already separator-agnostic) and
+    normalized to `/` as usual. `localize` still emits ONE native form, so this
+    many-dialects -> one-sentinel direction keeps canonicalize/localize a stable
+    pair (the push guard checks canonical stability, not exact bytes)."""
+    m = re.match(r"^([A-Za-z]):[\\/]?(.*)$", root)
+    if m:  # drive-rooted: accept C:\  C:/  or /c/  for the drive, any sep within
+        drive, rest = m.group(1), m.group(2)
+        segs = [re.escape(s) for s in re.split(r"[\\/]+", rest) if s]
+        drive_alt = r"(?:" + re.escape(drive) + r":[\\/]|/" + re.escape(drive) + r"/)"
+        return drive_alt + r"[\\/]+".join(segs)
+    segs = [re.escape(s) for s in re.split(r"[\\/]+", root) if s]
+    return r"[\\/]+".join(segs) if segs else re.escape(root)
+
+
 @lru_cache(maxsize=512)
-def _boundary_pattern(root: str) -> re.Pattern[str]:
+def _boundary_pattern(root: str, windows: bool = False) -> re.Pattern[str]:
     """Match `root` only where it stands as a whole path prefix.
 
     Trailing rules (validated against real transcripts):
@@ -160,13 +186,19 @@ def _boundary_pattern(root: str) -> re.Pattern[str]:
         whitespace/quote/end is sentence punctuation ("...in <root>. Next") ->
         match. This distinction is what clears the residue dogfooding surfaced.
       - A following `/` is the normal `<root>/child` case -> match.
-    """
+
+    `windows=True` builds a separator/case-tolerant anchor (see
+    `_windows_anchor_regex`); POSIX keeps exact, case-sensitive matching (paths
+    are case-sensitive there and `\\` is a legal, if rare, filename char)."""
+    anchor_re = _windows_anchor_regex(root) if windows else re.escape(root)
+    flags = re.IGNORECASE if windows else 0
     return re.compile(
         r"(?<![" + _LEADING_TOKEN_CHARS + r"])"
-        + re.escape(root)
+        + anchor_re
         + r"(?![A-Za-z0-9_-])"      # not a name-continuation character
         + r"(?!\.[A-Za-z0-9])"      # not an extension dot (allow trailing period)
-        + _TAIL                     # consume the path tail so we can normalize seps
+        + _TAIL,                    # consume the path tail so we can normalize seps
+        flags,
     )
 
 
@@ -207,6 +239,17 @@ def build_mappings(home: str, project_root: str, encoded_dir: str,
 _SENTINEL_PROBE = "{{CC_"  # all sentinels start with this; gate the escape passes
 
 
+def _win_anchor_present(anchor: str, probe: str) -> bool:
+    """Cheap gate for the Windows regex: True if any dialect of `anchor` could be
+    in `probe` (= the value lowercased with `\\`->`/`). Catches `C:\\`/`C:/` via a
+    plain normalized substring and the `/c/` msys form via a constructed needle."""
+    a = anchor.lower().replace("\\", "/")
+    if a in probe:
+        return True
+    m = re.match(r"^([a-z]):/(.*)$", a)
+    return bool(m and "/" + m.group(1) + "/" + m.group(2) in probe)
+
+
 def canonicalize_value(s: str, mappings: list[Mapping], src_sep: str = "/") -> tuple[str, int]:
     """Canonicalize one decoded string value against an ordered mapping set.
     Escapes any literal sentinels first, then boundary-replaces each anchor
@@ -215,17 +258,26 @@ def canonicalize_value(s: str, mappings: list[Mapping], src_sep: str = "/") -> t
 
     Cheap substring pre-checks gate every regex: a value that doesn't contain a
     given anchor (or any sentinel) skips that scan entirely — most string values
-    mention at most one anchor, so this avoids the bulk of the regex work."""
+    mention at most one anchor, so this avoids the bulk of the regex work. On
+    Windows the gate and the regex are dialect/case-tolerant (see
+    `_windows_anchor_regex`)."""
     if _SENTINEL_PROBE in s:
         s = _escape_literals_multi(s, [sent for _, sent in mappings])
+    windows = src_sep == "\\"
+    probe = s.lower().replace("\\", "/") if windows else s
     n = 0
     for anchor, sentinel in mappings:
-        if anchor not in s:           # a substring miss is a guaranteed regex miss
+        if windows:
+            if not _win_anchor_present(anchor, probe):
+                continue
+        elif anchor not in s:         # a substring miss is a guaranteed regex miss
             continue
         def repl(m, sent=sentinel):
             return sent + _to_canonical_seps(m.group(1), src_sep)
-        s, c = _boundary_pattern(anchor).subn(repl, s)
+        s, c = _boundary_pattern(anchor, windows).subn(repl, s)
         n += c
+        if c and windows:             # s changed under us; refresh the gate probe
+            probe = s.lower().replace("\\", "/")
     return s, n
 
 

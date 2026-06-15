@@ -12,6 +12,83 @@ import unittest
 from unittest import mock
 
 from convergence import pathmap
+from convergence.roster import Participant
+
+
+WIN_ROOT = "C:\\LocalData\\projects\\submatrix-rust"
+WIN_HOME = "C:\\Users\\BryonWilliams"
+ENCODED = "C--LocalData-projects-submatrix-rust"
+
+
+def _win_participant():
+    return Participant(machine_id="win", os="windows", home=WIN_HOME,
+                       project_root=WIN_ROOT)
+
+
+class WindowsDialectTest(unittest.TestCase):
+    """A Rust/Windows project's transcripts mostly hold the project root in
+    cargo's `C:/` and git-bash's `/c/` dialects, not Claude Code's native `C:\\`.
+    Canonicalize must catch all three (and any case)."""
+
+    def setUp(self):
+        self.maps = pathmap.build_mappings(WIN_HOME, WIN_ROOT, ENCODED)
+        self.sep = "\\"
+
+    def _canon(self, s):
+        return pathmap.canonicalize_value(s, self.maps, self.sep)[0]
+
+    def test_all_root_dialects_canonicalize(self):
+        for raw in (
+            r'cd "C:\LocalData\projects\submatrix-rust\crates" && cargo build',
+            r'cd "C:/LocalData/projects/submatrix-rust/crates" && cargo build',
+            r'cd "/c/LocalData/projects/submatrix-rust/crates" && cargo build',
+            r'see c:\localdata\projects\submatrix-rust\Cargo.toml',   # lowercase
+        ):
+            out = self._canon(raw)
+            self.assertIn(pathmap.SENTINEL_PROJECT_ROOT, out, raw)
+            self.assertNotIn("LocalData", out, raw)      # no residue
+            self.assertNotIn("/c/", out, raw)
+
+    def test_home_dialects_canonicalize(self):
+        for raw in (
+            r'load C:\Users\BryonWilliams\.cargo\registry\foo',
+            r'load C:/Users/BryonWilliams/.cargo/registry/foo',
+            r'load /c/Users/BryonWilliams/.cargo/registry/foo',
+        ):
+            out = self._canon(raw)
+            self.assertIn(pathmap.SENTINEL_HOME, out, raw)
+            self.assertNotIn("BryonWilliams", out, raw)
+
+    def test_sibling_project_is_left_alone(self):
+        # The sibling Python project 'submatrix' (no -rust) has no portable
+        # target — must NOT be mangled by the root anchor.
+        raw = r'engine at C:/LocalData/projects/submatrix/tmp/colmap.exe'
+        out = self._canon(raw)
+        self.assertIn("submatrix/tmp", out)
+        self.assertNotIn(pathmap.SENTINEL_PROJECT_ROOT, out)
+
+    def test_canonical_stability_through_windows_roundtrip(self):
+        # The push guard's property: canonicalize(localize(canon)) == canon, even
+        # though localize collapses every dialect to the one native form.
+        p = _win_participant()
+        for raw in (
+            r'cargo built C:/LocalData/projects/submatrix-rust/target/x',
+            r'/c/Users/BryonWilliams/.submatrix/jobs/run',
+        ):
+            canon = pathmap.canonicalize_value(raw, self.maps, self.sep)[0]
+            back = pathmap.localize_value(canon, self.maps, self.sep)[0]
+            recanon = pathmap.canonicalize_value(back, self.maps, self.sep)[0]
+            self.assertEqual(recanon, canon, raw)
+
+    def test_posix_paths_unaffected_by_windows_logic(self):
+        # A POSIX participant must still match exactly/case-sensitively.
+        maps = pathmap.build_mappings("/Users/bob", "/Users/bob/src/proj",
+                                      "-Users-bob-src-proj")
+        out = pathmap.canonicalize_value("/Users/bob/src/proj/main.py", maps, "/")[0]
+        self.assertIn(pathmap.SENTINEL_PROJECT_ROOT, out)
+        # case must NOT fold on POSIX
+        out2 = pathmap.canonicalize_value("/users/BOB/src/proj/main.py", maps, "/")[0]
+        self.assertNotIn(pathmap.SENTINEL_PROJECT_ROOT, out2)
 
 
 class WindowsAncestorTest(unittest.TestCase):
