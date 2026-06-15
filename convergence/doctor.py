@@ -38,6 +38,12 @@ from .pathmap import (
 from .roster import Participant
 
 
+def _under(child: str, parent: str) -> bool:
+    """Is `child` `parent` or a path beneath it? Separator-agnostic (POSIX `/`
+    and Windows `\\`) so Windows subdir cwds aren't misreported as siblings."""
+    return child == parent or child.startswith(parent + "/") or child.startswith(parent + "\\")
+
+
 def _iter_records(path: str):
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -79,15 +85,13 @@ class DoctorReport:
     def subdir_cwds(self) -> list[str]:
         if not self.project_root:
             return []
-        return [c for c in self.cwds
-                if c != self.project_root and c.startswith(self.project_root + "/")]
+        return [c for c in self.cwds if c != self.project_root and _under(c, self.project_root)]
 
     @property
     def sibling_roots(self) -> list[str]:
         if not self.project_root:
             return list(self.cwds)
-        return [c for c in self.cwds
-                if c != self.project_root and not c.startswith(self.project_root + "/")]
+        return [c for c in self.cwds if not _under(c, self.project_root)]
 
     @property
     def ok(self) -> bool:
@@ -180,8 +184,9 @@ def format_report(rep: DoctorReport) -> str:
         L.append(f"  note: {len(rep.subdir_cwds)} subdir cwd(s) under root (handled): "
                  + ", ".join(rep.subdir_cwds[:3]))
     if rep.sibling_roots:
-        L.append(f"  note: {len(rep.sibling_roots)} sibling root(s) outside project "
-                 + ("(rewritten via {{CC_HOME}})" if rep.rewrite_home else "(flagged, not rewritten)") + ":")
+        L.append(f"  note: {len(rep.sibling_roots)} external root(s) outside this project "
+                 "(rewritten only where they fall under home; another project's paths stay "
+                 "machine-specific):")
         for s in rep.sibling_roots[:5]:
             L.append(f"        {s}")
 
