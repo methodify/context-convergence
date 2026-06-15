@@ -20,6 +20,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -100,10 +101,17 @@ class DoctorReport:
                 and self.residue_root == 0)
 
 
-def scan(context_dir, root=None, home=None, rewrite_home=True) -> DoctorReport:
+def _progress(msg: str) -> None:
+    print(msg, file=sys.stderr, flush=True)
+
+
+def scan(context_dir, root=None, home=None, rewrite_home=True, progress=True) -> DoctorReport:
+    """Stream-scan a context dir with bounded memory — one record at a time, no
+    whole-file-in-RAM. Safe on 500MB+ transcripts."""
     rep = DoctorReport(context_dir=context_dir, rewrite_home=rewrite_home)
     rep.files = sorted(glob.glob(os.path.join(context_dir, "*.jsonl")))
 
+    # Pass 1: collect cwds (one record at a time) to infer the root.
     for f in rep.files:
         for rec in _iter_records(f):
             rep.record_count += 1
@@ -120,29 +128,41 @@ def scan(context_dir, root=None, home=None, rewrite_home=True) -> DoctorReport:
     mappings = participant.mappings(rewrite_home)
     context_anchor = f"{rep.home}/.claude/projects/{participant.encoded_dir}"
 
-    for f in rep.files:
+    # Pass 2: round-trip + residue + tier coverage, streaming line by line so a
+    # single huge file never balloons memory. Each JSONL line is an independent
+    # document, so the per-line round-trip is equivalent to the whole-file one.
+    n = len(rep.files)
+    for i, f in enumerate(rep.files, 1):
+        if progress:
+            _progress(f"  scanning {i}/{n}  {os.path.basename(f)} "
+                      f"({os.path.getsize(f) // 1048576} MB)…")
+        roundtrip_ok = True
         with open(f, encoding="utf-8", errors="replace") as fh:
-            original = fh.read()
-        canon, _ = canonicalize_jsonl(original, mappings)
-        if localize_jsonl(canon, mappings)[0] != normalize_jsonl(original):
+            for line in fh:
+                if not line.strip():
+                    continue
+                canon, _ = canonicalize_jsonl(line, mappings)
+                if roundtrip_ok and localize_jsonl(canon, mappings)[0] != normalize_jsonl(line):
+                    roundtrip_ok = False
+                if rep.project_root in canon:
+                    rep.residue_root += canon.count(rep.project_root)
+                if rewrite_home and rep.home in canon:
+                    rep.residue_home += canon.count(rep.home)
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                for sval in _walk_strings(rec):
+                    if context_anchor in sval:
+                        rep.tier_hits[SENTINEL_CONTEXT_DIR] += 1
+                    elif rep.project_root in sval:
+                        rep.tier_hits[SENTINEL_PROJECT_ROOT] += 1
+                    elif participant.encoded_dir in sval:
+                        rep.tier_hits[SENTINEL_ENCODED_DIR] += 1
+                    elif rewrite_home and rep.home in sval:
+                        rep.tier_hits[SENTINEL_HOME] += 1
+        if not roundtrip_ok:
             rep.roundtrip_failures.append(f)
-        if rep.project_root in canon:
-            rep.residue_root += canon.count(rep.project_root)
-        if rewrite_home and rep.home in canon:
-            rep.residue_home += canon.count(rep.home)
-
-    # Per-tier coverage: count string values mentioning each anchor.
-    for f in rep.files:
-        for rec in _iter_records(f):
-            for sval in _walk_strings(rec):
-                if context_anchor in sval:
-                    rep.tier_hits[SENTINEL_CONTEXT_DIR] += 1
-                elif rep.project_root in sval:
-                    rep.tier_hits[SENTINEL_PROJECT_ROOT] += 1
-                elif participant.encoded_dir in sval:
-                    rep.tier_hits[SENTINEL_ENCODED_DIR] += 1
-                elif rewrite_home and rep.home in sval:
-                    rep.tier_hits[SENTINEL_HOME] += 1
     return rep
 
 

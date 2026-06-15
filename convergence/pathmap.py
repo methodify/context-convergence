@@ -288,11 +288,21 @@ def normalize_jsonl(text: str) -> str:
 # Root inference
 # --------------------------------------------------------------------------- #
 def _ancestors(path: str) -> list[str]:
-    path = path.rstrip("/")
+    """`/a/b/c` -> ['/a/b/c', '/a/b', '/a', '/'] up to the filesystem root.
+
+    Terminates at the root on EVERY platform by detecting that `os.path.dirname`
+    has reached a fixpoint — POSIX `/` and Windows `C:\\` both satisfy
+    dirname(p) == p. (The old `while path != "/"` check looped forever on Windows,
+    where the drive root is never `/`, eating unbounded memory.)"""
     out = []
-    while path and path != "/":
+    seen = set()
+    while path and path not in seen:
         out.append(path)
-        path = os.path.dirname(path)
+        seen.add(path)
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
     return out
 
 
