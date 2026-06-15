@@ -84,7 +84,10 @@ def _context_entries(encoded_dir: str) -> list[tuple[str, str]]:
                for f in sorted(glob.glob(os.path.join(base, "*.jsonl")))]
     for f in sorted(glob.glob(os.path.join(base, "memory", "**", "*"), recursive=True)):
         if os.path.isfile(f):
-            entries.append((os.path.relpath(f, base), "text"))
+            # relpaths are ALWAYS forward-slash: that's git's and the cluster's
+            # convention, and Windows file APIs accept `/` too. os.path.relpath
+            # would emit `\` on Windows, breaking git pathspecs (show/diff).
+            entries.append((os.path.relpath(f, base).replace(os.sep, "/"), "text"))
     return entries
 
 

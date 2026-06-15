@@ -53,7 +53,9 @@ def three_way_merge(base: str, ours: str, theirs: str, *, union: bool = False,
                 fh.write(content)
         args = ["git", "merge-file", "-p"]
         args += ["--union"] if union else ["-L", ours_label, "-L", "base", "-L", theirs_label]
-        proc = subprocess.run(args + [po, pb, pt], capture_output=True, text=True)
+        # encoding=utf-8 explicitly — Windows' cp1252 default mangles git's UTF-8.
+        proc = subprocess.run(args + [po, pb, pt], capture_output=True,
+                              encoding="utf-8", errors="replace")
         if proc.returncode == 255:  # git merge-file error
             raise RuntimeError(f"git merge-file failed: {proc.stderr.strip()}")
         return proc.stdout, proc.returncode  # returncode == number of conflicts

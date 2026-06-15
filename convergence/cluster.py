@@ -72,7 +72,8 @@ class Cluster:
         out = []
         for f in sorted(glob.glob(os.path.join(self.context_dir, "**", "*"), recursive=True)):
             if os.path.isfile(f):
-                out.append(os.path.relpath(f, self.context_dir))
+                # forward-slash relpaths (git/cluster convention); see engine
+                out.append(os.path.relpath(f, self.context_dir).replace(os.sep, "/"))
         return out
 
     def has_context(self, relpath: str) -> bool:

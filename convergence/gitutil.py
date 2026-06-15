@@ -29,7 +29,11 @@ class GitError(RuntimeError):
 
 
 def _git(args: list[str], cwd: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
-    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    # encoding=utf-8 explicitly: git emits UTF-8, but Windows' default locale
+    # codec (cp1252) chokes on it ("charmap can't decode 0x9d") and corrupts
+    # output — e.g. a garbled 3-way merge base reporting a bogus conflict.
+    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+                          encoding="utf-8", errors="replace")
     if check and proc.returncode != 0:
         raise GitError(f"git {' '.join(args)} (in {cwd}):\n{proc.stderr.strip()}")
     return proc
