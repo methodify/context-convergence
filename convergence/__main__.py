@@ -48,11 +48,19 @@ def _cmd_init(args) -> int:
 
 
 def _cmd_sync(args) -> int:
-    r = engine.sync_full(args.project_root, project_id=args.project_id, full=args.full)
+    r = engine.sync_full(args.project_root, project_id=args.project_id,
+                         full=args.full, dry_run=args.dry_run)
     skipped = f", {r['skipped']} unchanged" if r.get("skipped") else ""
-    print(f"sync '{r['project_id']}': pulled {r['pulled']}, pushed {r['pushed']} file(s){skipped}")
-    if r["backup"]:
-        print(f"  backup: {r['backup']}")
+    if r.get("dry_run"):
+        print(f"DRY RUN — sync '{r['project_id']}' would push {r['pushed']}, "
+              f"pull {r['pulled']} file(s){skipped} (no changes made)")
+        _print_list("would push", r.get("push_changed"))
+        _print_list("would pull (new)", r.get("pull_new"))
+        _print_list("would pull (overwrite)", r.get("pull_overwrite"))
+    else:
+        print(f"sync '{r['project_id']}': pulled {r['pulled']}, pushed {r['pushed']} file(s){skipped}")
+        if r["backup"]:
+            print(f"  backup: {r['backup']}")
     _print_conflicts(r.get("conflicts"))
     return 0
 
@@ -141,12 +149,28 @@ def _print_conflicts(conflicts) -> None:
               "then sync again.", file=sys.stderr)
 
 
+def _print_list(label, items, limit=20):
+    if not items:
+        return
+    print(f"  {label} ({len(items)}):")
+    for it in items[:limit]:
+        print(f"      {it}")
+    if len(items) > limit:
+        print(f"      … and {len(items) - limit} more")
+
+
 def _cmd_push(args) -> int:
     r = engine.push(args.project_root, project_id=args.project_id,
-                    scan_secrets=args.scan_secrets, strict_secrets=args.strict, full=args.full)
+                    scan_secrets=args.scan_secrets, strict_secrets=args.strict,
+                    full=args.full, dry_run=args.dry_run)
     skipped = f", {r['skipped']} unchanged" if r.get("skipped") else ""
-    print(f"push '{r['project_id']}': {r['files']} file(s){skipped}, "
-          f"{r['substitutions']} path(s) canonicalized -> {r['cluster']}")
+    if r.get("dry_run"):
+        print(f"DRY RUN — push '{r['project_id']}' would upload {r['files']} file(s){skipped} "
+              f"(no changes made)")
+        _print_list("would push", r.get("changed"))
+    else:
+        print(f"push '{r['project_id']}': {r['files']} file(s){skipped}, "
+              f"{r['substitutions']} path(s) canonicalized -> {r['cluster']}")
     _print_secret_warnings(r.get("secret_warnings"))
     _print_conflicts(r.get("conflicts"))
     return 0
@@ -188,11 +212,18 @@ def _cmd_hook(args) -> int:
 
 
 def _cmd_pull(args) -> int:
-    r = engine.pull(args.project_root, project_id=args.project_id, full=args.full)
-    print(f"pull '{r['project_id']}': {r['files']} file(s), "
-          f"{r['substitutions']} path(s) localized -> {r['local_dir']}")
-    if r["backup"]:
-        print(f"  backup: {r['backup']}")
+    r = engine.pull(args.project_root, project_id=args.project_id,
+                    full=args.full, dry_run=args.dry_run)
+    if r.get("dry_run"):
+        print(f"DRY RUN — pull '{r['project_id']}' would localize {r['files']} file(s) "
+              f"into {r['local_dir']} (no changes made)")
+        _print_list("new", r.get("new"))
+        _print_list("would overwrite (backed up first)", r.get("overwrite"))
+    else:
+        print(f"pull '{r['project_id']}': {r['files']} file(s), "
+              f"{r['substitutions']} path(s) localized -> {r['local_dir']}")
+        if r["backup"]:
+            print(f"  backup: {r['backup']}")
     return 0
 
 
@@ -321,9 +352,10 @@ def main(argv=None) -> int:
     pushp.add_argument("--scan-secrets", action="store_true", help="scan for apparent secrets first")
     pushp.add_argument("--strict", action="store_true", help="with --scan-secrets, refuse on any finding")
     pushp.add_argument("--full", action="store_true", help="reprocess every file (ignore incremental fingerprints)")
+    pushp.add_argument("--dry-run", action="store_true", help="show what would be pushed; change nothing")
     pushp.set_defaults(func=_cmd_push)
 
-    for name, fn, help_, has_full in (
+    for name, fn, help_, syncy in (
         ("pull", _cmd_pull, "localize cluster context into ~/.claude/projects", True),
         ("sync", _cmd_sync, "pull then push (the everyday verb)", True),
         ("status", _cmd_status, "show dirty/behind state and roster", False),
@@ -332,9 +364,11 @@ def main(argv=None) -> int:
         sp = sub.add_parser(name, help=help_)
         sp.add_argument("project_root", nargs="?", default=None)
         sp.add_argument("--project-id", default=None)
-        if has_full:
+        if syncy:
             sp.add_argument("--full", action="store_true",
                             help="reprocess every file (ignore incremental fingerprints)")
+            sp.add_argument("--dry-run", action="store_true",
+                            help="show what would happen; change nothing")
         sp.set_defaults(func=fn)
 
     hs = sub.add_parser("hook-sync", help="(internal) soft-failing sync for the Stop hook")

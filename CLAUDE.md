@@ -38,6 +38,7 @@ python3 -m convergence join <project_root> --remote <git-url> [--project-id ID]
 python3 -m convergence projects [--remote <git-url>]         # list projects (branches)
 python3 -m convergence remote [show|set <url>|clear]         # machine-level default remote
 python3 -m convergence push|pull|sync|status [project_root] [--project-id ID]
+#   push/pull/sync take --full (ignore fingerprints) and --dry-run (preview, change nothing)
 #   (--cluster <dir> instead of --remote = a local no-git cluster, one project per dir)
 # --remote is optional on init/join/projects: falls back to the default remote
 # (config.resolve_remote: explicit > CONVERGENCE_REMOTE env > stored default).
