@@ -75,6 +75,9 @@ class Cluster:
                 out.append(os.path.relpath(f, self.context_dir))
         return out
 
+    def has_context(self, relpath: str) -> bool:
+        return os.path.exists(os.path.join(self.context_dir, relpath))
+
     def read_context(self, relpath: str) -> str | None:
         path = os.path.join(self.context_dir, relpath)
         try:

@@ -75,9 +75,11 @@ class ScanIntegrationTest(unittest.TestCase):
             engine.push(project_id="demo", scan_secrets=True, strict_secrets=True)
 
     def test_push_warns_but_proceeds_without_strict(self):
+        # The scan runs regardless of incremental skipping; nothing here changed
+        # since init, so the push proceeds (no exception) and surfaces the warning.
         r = engine.push(project_id="demo", scan_secrets=True)
         self.assertIn("sess.jsonl", r["secret_warnings"])  # surfaced
-        self.assertEqual(r["files"], 1)                     # but still pushed
+        self.assertEqual(r["files"] + r["skipped"], 1)     # proceeded, not refused
 
     def test_push_without_scan_is_silent(self):
         r = engine.push(project_id="demo")

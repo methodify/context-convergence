@@ -35,6 +35,12 @@ import json
 import os
 import re
 
+# Bump whenever the canonicalization logic changes (encoding, mappings, sentinel
+# scheme, separator handling, ...). Stored in local state; a mismatch forces a
+# full re-process so incremental sync never serves stale-canonical files after an
+# upgrade. (This is the encoded-dir-tier upgrade case, made automatic.)
+CANON_VERSION = 1
+
 DEFAULT_SENTINEL = "{{CC_PROJECT_ROOT}}"
 # The three rewrite tiers (cluster-wide policy; see build_mappings). Ordered here
 # most-specific to least; applied longest-anchor-first so specific beats general.

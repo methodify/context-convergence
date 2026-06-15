@@ -25,6 +25,7 @@ from .errors import ConvergenceError, LockBusy  # noqa: F401 (re-exported)
 from .localstate import LocalState
 from .lock import project_lock
 from .pathmap import (
+    CANON_VERSION,
     canonicalize_jsonl,
     canonicalize_value,
     encode_project_dir,
@@ -56,6 +57,18 @@ def _local_context_files(encoded_dir: str) -> list[str]:
 
 def _kind_of(relpath: str) -> str:
     return "jsonl" if relpath.endswith(".jsonl") else "text"
+
+
+def _fingerprint(path: str) -> list:
+    """A cheap change token (size, mtime_ns) — the git/make/rsync heuristic. A
+    `--full` run bypasses it for the rare edit that preserves both."""
+    s = os.stat(path)
+    return [s.st_size, s.st_mtime_ns]
+
+
+def _current_fingerprints(encoded_dir: str) -> dict:
+    base = _local_context_dir(encoded_dir)
+    return {rel: _fingerprint(os.path.join(base, rel)) for rel, _ in _context_entries(encoded_dir)}
 
 
 def _context_entries(encoded_dir: str) -> list[tuple[str, str]]:
@@ -156,14 +169,18 @@ def _localize_entry(participant: Participant, text: str, kind: str, rewrite_home
     return localize_jsonl(text, maps, sep) if kind == "jsonl" else localize_value(text, maps, sep)
 
 
-def _localize_into_local(transport, participant, encoded, rewrite_home):
-    """Localize every cluster file into the local context dir, preserving
-    relative structure (so memory/ lands under memory/)."""
+def _localize_into_local(transport, participant, encoded, rewrite_home, relpaths=None):
+    """Localize cluster files into the local context dir, preserving relative
+    structure. `relpaths=None` means every file (full pull); otherwise only the
+    given subset (incremental pull — what git says changed)."""
     local_dir = _local_context_dir(encoded)
+    targets = transport.cluster.context_files() if relpaths is None else relpaths
     n_files = n_subs = 0
-    for relpath in transport.cluster.context_files():
-        text, n = _localize_entry(participant, transport.cluster.read_context(relpath),
-                                  _kind_of(relpath), rewrite_home)
+    for relpath in targets:
+        text = transport.cluster.read_context(relpath)
+        if text is None:  # listed as changed but absent (deletion) — skip, never delete local
+            continue
+        text, n = _localize_entry(participant, text, _kind_of(relpath), rewrite_home)
         _atomic_write(os.path.join(local_dir, relpath), text)
         n_files += 1
         n_subs += n
@@ -173,15 +190,19 @@ def _localize_into_local(transport, participant, encoded, rewrite_home):
 _BACKUP_KEEP = 10  # timestamped backups retained per project
 
 
-def _backup_local_context(encoded_dir: str) -> str | None:
-    """Back up every synced file (transcripts AND memory) before pull/join
-    overwrites the local context dir, preserving relative structure. The backup
-    dir name is collision-proof (a `-N` suffix if the same second recurs) and old
-    backups are pruned to the newest _BACKUP_KEEP."""
-    entries = _context_entries(encoded_dir)
+def _backup_local_context(encoded_dir: str, relpaths=None) -> str | None:
+    """Back up synced files before pull/join overwrites them, preserving relative
+    structure. `relpaths=None` backs up everything; otherwise only the given
+    subset (incremental pull only overwrites those, so only those need backing
+    up). Collision-proof dir name; pruned to the newest _BACKUP_KEEP."""
+    base = _local_context_dir(encoded_dir)
+    if relpaths is None:
+        entries = _context_entries(encoded_dir)
+    else:
+        entries = [(r, _kind_of(r)) for r in relpaths
+                   if os.path.exists(os.path.join(base, r))]
     if not entries:
         return None
-    base = _local_context_dir(encoded_dir)
     parent = os.path.join(env.convergence_home(), "backups", encoded_dir)
     stamp = env.now_iso().replace(":", "")
     dst = os.path.join(parent, stamp)
@@ -221,11 +242,19 @@ def _publishing(op):
                            f"(branch kept advancing): {last}")
 
 
-def _write_canonical(transport, participant, encoded, rewrite_home, *, union, base_commit=None):
+def _write_canonical(transport, participant, encoded, rewrite_home, *, union,
+                     base_commit=None, prev_fingerprints=None, canon_ok=True):
     """Canonicalize this machine's local context into the cluster working tree
     and merge with whatever the branch already holds. Returns
-    (n_files, n_subs, conflicts) where each conflict is a dict describing a
-    session divergence or a memory merge conflict.
+    (n_files, n_subs, conflicts, fingerprints, n_skipped).
+
+    INCREMENTAL: a file whose (size, mtime) matches `prev_fingerprints` AND which
+    is already present in the cluster is skipped untouched — that is the whole
+    point. Skipping is safe because an unchanged local file already reached the
+    cluster at our last push, and any later cluster change either supersets our
+    records or is a divergence that keeps our lineage (so the cluster still has
+    our content). The cluster-presence check guards a wiped/re-cloned cluster;
+    `canon_ok` False (a canonicalizer-version bump, or `--full`) reprocesses all.
 
     - identical / new file -> write as-is.
     - transcript (.jsonl) that differs: union the appends UNLESS the two have
@@ -236,9 +265,19 @@ def _write_canonical(transport, participant, encoded, rewrite_home, *, union, ba
       conflict markers in the file and are flagged.
     """
     conflicts: list[dict] = []
-    n_files = n_subs = 0
+    fingerprints: dict = {}
+    n_files = n_subs = n_skipped = 0
+    incremental = canon_ok and prev_fingerprints is not None
+    base_dir = _local_context_dir(encoded)
     for relpath, kind in _context_entries(encoded):
-        text = _read(os.path.join(_local_context_dir(encoded), relpath))
+        path = os.path.join(base_dir, relpath)
+        fp = _fingerprint(path)
+        fingerprints[relpath] = fp
+        if (incremental and prev_fingerprints.get(relpath) == fp
+                and transport.cluster.has_context(relpath)):
+            n_skipped += 1
+            continue
+        text = _read(path)
         canon, n = _guarded_canonicalize(participant, text, kind, rewrite_home)
         existing = transport.cluster.read_context(relpath) if union else None
 
@@ -267,15 +306,19 @@ def _write_canonical(transport, participant, encoded, rewrite_home, *, union, ba
                 conflicts.append({"path": relpath, "kind": "memory-conflict", "count": nconf})
         n_files += 1
         n_subs += n
-    return n_files, n_subs, conflicts
+    return n_files, n_subs, conflicts, fingerprints, n_skipped
 
 
-def _save_state(pid, mid, transport, root, encoded, remote, now):
+def _save_state(pid, mid, transport, root, encoded, remote, now, *,
+                fingerprints=None, last_localized_commit=None):
+    commit = gitutil.current_commit(transport.cluster.root)
     LocalState(
         project_id=pid, machine_id=mid, cluster_root=transport.cluster.root,
         project_root=root, encoded_dir=encoded, remote=remote,
         branch=project_branch(pid) if remote else None,
-        last_converged=now, last_converged_commit=gitutil.current_commit(transport.cluster.root),
+        last_converged=now, last_converged_commit=commit,
+        file_fingerprints=fingerprints, last_localized_commit=last_localized_commit,
+        canon_version=CANON_VERSION,
     ).save()
 
 
@@ -300,21 +343,28 @@ def _init(root, encoded, pid, remote, cluster, rewrite_home) -> dict:
         raise ConvergenceError(
             f"project '{pid}' already exists in the cluster — use `push`, or `join`")
     mid, now = env.machine_id(), env.now_iso()
+    out = {}
 
     def op():
         transport.ensure()  # creates the orphan branch (+ main README on a fresh cluster)
         participant = Participant(machine_id=mid, os=env.detected_os(),
                                   home=env.home_dir(), project_root=root, last_converged=now)
         roster = Roster(project_id=pid, rewrite_home=rewrite_home, participants=[participant])
-        nf, ns, _ = _write_canonical(transport, participant, encoded, roster.rewrite_home, union=False)
+        nf, ns, _conf, fps, _sk = _write_canonical(
+            transport, participant, encoded, roster.rewrite_home, union=False)
         transport.cluster.save_roster(roster)
         transport.publish(f"init {pid} from {mid}")
-        return nf, ns
+        out.update(files=nf, subs=ns, fingerprints=fps)
 
-    n_files, n_subs = _publishing(op)
-    _save_state(pid, mid, transport, root, encoded, remote, now)
-    return {"project_id": pid, "machine_id": mid, "files": n_files, "substitutions": n_subs,
-            "cluster": transport.cluster.root, "remote": remote, "branch": project_branch(pid)}
+    _publishing(op)
+    # The cluster commit we just created reflects local exactly, so it is also our
+    # pull baseline (last_localized_commit).
+    _save_state(pid, mid, transport, root, encoded, remote, now,
+                fingerprints=out["fingerprints"],
+                last_localized_commit=gitutil.current_commit(transport.cluster.root))
+    return {"project_id": pid, "machine_id": mid, "files": out["files"],
+            "substitutions": out["subs"], "cluster": transport.cluster.root,
+            "remote": remote, "branch": project_branch(pid)}
 
 
 # --------------------------------------------------------------------------- #
@@ -353,7 +403,11 @@ def _join(root, encoded, pid, remote, cluster) -> dict:
     backup = _backup_local_context(encoded)
     n_files, n_subs = _localize_into_local(transport, result["participant"],
                                            encoded, result["rewrite_home"])
-    _save_state(pid, mid, transport, root, encoded, remote, now)
+    # Local now reflects the cluster HEAD (pull baseline); record fingerprints of
+    # the just-materialized files so the first push after join is incremental.
+    _save_state(pid, mid, transport, root, encoded, remote, now,
+                fingerprints=_current_fingerprints(encoded),
+                last_localized_commit=gitutil.current_commit(transport.cluster.root))
     return {"project_id": pid, "machine_id": mid, "files": n_files, "substitutions": n_subs,
             "participants": result["participants"], "backup": backup,
             "local_dir": _local_context_dir(encoded)}
@@ -362,13 +416,14 @@ def _join(root, encoded, pid, remote, cluster) -> dict:
 # --------------------------------------------------------------------------- #
 # push
 # --------------------------------------------------------------------------- #
-def push(project_root=None, project_id=None, scan_secrets=False, strict_secrets=False) -> dict:
+def push(project_root=None, project_id=None, scan_secrets=False, strict_secrets=False,
+         full=False) -> dict:
     st = _resolve_state(project_root, project_id)
     with project_lock(st.project_id):
-        return _push(st, scan_secrets, strict_secrets)
+        return _push(st, scan_secrets, strict_secrets, full)
 
 
-def _push(st, scan_secrets=False, strict_secrets=False) -> dict:
+def _push(st, scan_secrets=False, strict_secrets=False, full=False) -> dict:
     warnings = _scan_files(st.encoded_dir) if scan_secrets else {}
     if warnings and strict_secrets:
         n = sum(len(v) for v in warnings.values())
@@ -377,6 +432,8 @@ def _push(st, scan_secrets=False, strict_secrets=False) -> dict:
             f"run `convergence scan`, or push without --strict. Nothing was written.")
     transport = open_transport(st.project_id, st.remote, st.cluster_root)
     now = env.now_iso()
+    # Incremental unless --full, the canonicalizer changed, or there's no prior state.
+    canon_ok = (not full) and st.canon_version == CANON_VERSION
     out = {}
 
     def op():
@@ -387,33 +444,37 @@ def _push(st, scan_secrets=False, strict_secrets=False) -> dict:
         if not participant:
             raise ConvergenceError(
                 f"this machine ({st.machine_id}) is not in the roster for '{st.project_id}'")
-        nf, ns, conflicts = _write_canonical(
+        nf, ns, conflicts, fps, skipped = _write_canonical(
             transport, participant, st.encoded_dir, roster.rewrite_home,
-            union=True, base_commit=st.last_converged_commit)
-        participant.last_converged = now
-        transport.cluster.save_roster(roster)
+            union=True, base_commit=st.last_converged_commit,
+            prev_fingerprints=st.file_fingerprints, canon_ok=canon_ok)
+        if nf:  # only stamp/commit the roster when something actually changed
+            participant.last_converged = now
+            transport.cluster.save_roster(roster)
         transport.publish(f"push {st.project_id} from {st.machine_id}")
-        out["files"], out["subs"], out["conflicts"] = nf, ns, conflicts
+        out.update(files=nf, subs=ns, conflicts=conflicts, fingerprints=fps, skipped=skipped)
 
     _publishing(op)
     st.last_converged = now
     st.last_converged_commit = gitutil.current_commit(transport.cluster.root)
+    st.file_fingerprints = out["fingerprints"]
+    st.canon_version = CANON_VERSION
     st.save()
     return {"project_id": st.project_id, "files": out["files"], "substitutions": out["subs"],
-            "cluster": transport.cluster.root, "secret_warnings": warnings,
-            "conflicts": out["conflicts"]}
+            "skipped": out["skipped"], "cluster": transport.cluster.root,
+            "secret_warnings": warnings, "conflicts": out["conflicts"]}
 
 
 # --------------------------------------------------------------------------- #
 # pull
 # --------------------------------------------------------------------------- #
-def pull(project_root=None, project_id=None) -> dict:
+def pull(project_root=None, project_id=None, full=False) -> dict:
     st = _resolve_state(project_root, project_id)
     with project_lock(st.project_id):
-        return _pull(st)
+        return _pull(st, full)
 
 
-def _pull(st) -> dict:
+def _pull(st, full=False) -> dict:
     transport = open_transport(st.project_id, st.remote, st.cluster_root)
     transport.ensure()
     transport.sync_down()
@@ -423,11 +484,25 @@ def _pull(st) -> dict:
         raise ConvergenceError(
             f"this machine ({st.machine_id}) is not in the roster for '{st.project_id}'")
 
-    backup = _backup_local_context(st.encoded_dir)
+    head = gitutil.current_commit(transport.cluster.root)
+    # Incremental: localize only the files git says changed since we last
+    # localized. Full when forced, when the canonicalizer changed, with no
+    # baseline, on a non-git cluster, or if git can't compute the diff.
+    relpaths = None
+    canon_ok = (not full) and st.canon_version == CANON_VERSION
+    if canon_ok and st.remote and st.last_localized_commit and head:
+        changed = gitutil.diff_names(transport.cluster.root,
+                                     st.last_localized_commit, head, "context")
+        if changed is not None:
+            relpaths = [c[len("context/"):] for c in changed if c.startswith("context/")]
+
+    backup = _backup_local_context(st.encoded_dir, relpaths)
     n_files, n_subs = _localize_into_local(transport, participant,
-                                           st.encoded_dir, roster.rewrite_home)
+                                           st.encoded_dir, roster.rewrite_home, relpaths)
     st.last_converged = env.now_iso()
-    st.last_converged_commit = gitutil.current_commit(transport.cluster.root)
+    st.last_converged_commit = head
+    st.last_localized_commit = head
+    st.canon_version = CANON_VERSION
     st.save()
     return {"project_id": st.project_id, "files": n_files, "substitutions": n_subs,
             "backup": backup, "local_dir": _local_context_dir(st.encoded_dir)}
@@ -439,12 +514,16 @@ def sync(project_root=None, project_id=None) -> dict:
     the cluster before pull overwrites the local dir — otherwise a pull-first
     sync would clobber unpushed local work (recoverable only from backup). The
     lock is held across both halves so nothing interleaves between them."""
+    return sync_full(project_root, project_id, full=False)
+
+
+def sync_full(project_root=None, project_id=None, full=False) -> dict:
     st = _resolve_state(project_root, project_id)
     with project_lock(st.project_id):
-        ph = _push(st)
-        pl = _pull(st)
+        ph = _push(st, full=full)
+        pl = _pull(st, full=full)
     return {"project_id": ph["project_id"], "pulled": pl["files"],
-            "pushed": ph["files"], "backup": pl["backup"],
+            "pushed": ph["files"], "skipped": ph["skipped"], "backup": pl["backup"],
             "conflicts": ph["conflicts"]}
 
 

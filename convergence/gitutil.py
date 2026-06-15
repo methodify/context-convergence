@@ -124,3 +124,17 @@ def show_file(cwd: str, commit: str, path: str) -> str | None:
     not exist there. `path` is relative to the repo root, e.g. context/x.md."""
     proc = _git(["show", f"{commit}:{path}"], cwd=cwd, check=False)
     return proc.stdout if proc.returncode == 0 else None
+
+
+def diff_names(cwd: str, base: str, head: str, pathspec: str | None = None) -> list[str] | None:
+    """Repo-relative paths added/modified between `base` and `head` (for
+    incremental pull — localize only what changed). Returns None if git can't
+    compute it (e.g. `base` no longer reachable) so the caller falls back to a
+    full pass."""
+    args = ["diff", "--name-only", "--diff-filter=AM", base, head]
+    if pathspec:
+        args += ["--", pathspec]
+    proc = _git(args, cwd=cwd, check=False)
+    if proc.returncode != 0:
+        return None
+    return [line for line in proc.stdout.splitlines() if line]

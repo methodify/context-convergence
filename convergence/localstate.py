@@ -27,6 +27,10 @@ class LocalState:
     branch: str | None = None
     last_converged: str | None = None
     last_converged_commit: str | None = None
+    # Incremental-sync bookkeeping:
+    file_fingerprints: dict | None = None      # {relpath: [size, mtime_ns]} at last push
+    last_localized_commit: str | None = None   # cluster commit reflected in the local dir (pull baseline)
+    canon_version: int | None = None           # canonicalizer version at last push/localize
 
     @staticmethod
     def path_for(project_id: str) -> str:
