@@ -453,22 +453,41 @@ def main(argv=None) -> int:
 
 
 def _git_error_hint(e) -> str:
-    """Turn a raw git failure into a clear, actionable one line (no traceback)."""
+    """Turn a raw git failure into a clear, actionable message (no traceback).
+    Always ends by showing git's OWN stderr — never hide the real cause."""
     text = str(e)
     low = text.lower()
-    if "not found" in low or "does not exist" in low:
-        return ("cluster remote not found — check the URL for typos, and make sure the "
-                "repo exists (create an empty private repo first if it doesn't)")
-    if any(k in low for k in ("authentication failed", "could not read username",
-                              "permission denied", "access denied", "403 forbidden")):
-        return ("could not authenticate to the cluster remote — if it's private, set up "
-                "SSH or a personal access token for git")
-    if any(k in low for k in ("could not resolve host", "unable to access", "couldn't connect",
-                              "connection timed out", "network is unreachable")):
-        return "could not reach the cluster remote — check your network and the URL"
-    # Fall back to git's own last meaningful line.
-    lines = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("git ")]
-    return f"git: {lines[-1].strip()}" if lines else text
+    hint = None
+    if "dubious ownership" in low:
+        hint = ("git refuses the remote repo as 'dubious ownership' — common for a "
+                "WSL/shared bare repo accessed by a different OS user. Trust it with the "
+                "`git config --global --add safe.directory ...` line git prints below "
+                "(use forward slashes, no quotes).")
+    elif "host key verification failed" in low:
+        hint = ("the server's SSH host key isn't trusted yet — connect once interactively "
+                "to accept it (`ssh -p <port> <user>@<host>`), then retry")
+    elif "permission denied" in low and "publickey" in low:
+        hint = ("SSH key rejected — put your public key in the server's "
+                "~/.ssh/authorized_keys for that user, and check the user in the URL")
+    elif "does not appear to be a git repository" in low or "not a git repository" in low:
+        hint = ("the remote path exists but isn't a git repo — on the server run "
+                "`git init --bare <path>` (the --remote path must already exist there)")
+    elif any(k in low for k in ("connection refused", "connection timed out",
+                                "could not resolve host", "network is unreachable",
+                                "couldn't connect", "operation timed out")):
+        hint = ("could not reach the server — check host/port, that it's up, and (for "
+                "Tailscale) that you're on the tailnet")
+    elif "not found" in low or "does not exist" in low:
+        hint = ("cluster remote not found — check the URL, and make sure the bare repo "
+                "exists on the server (`git init --bare <path>`)")
+    elif any(k in low for k in ("authentication failed", "could not read username",
+                                "access denied", "403 forbidden")):
+        hint = ("could not authenticate — set up SSH keys (or a token for https remotes)")
+    # Always append git's full stderr so the actual first-line cause is visible.
+    detail = text.split(":\n", 1)
+    detail = detail[1].strip() if len(detail) == 2 else text.strip()
+    detail = "  " + detail.replace("\n", "\n  ")
+    return f"{hint}\n\ngit said:\n{detail}" if hint else f"git failed:\n{detail}"
 
 
 if __name__ == "__main__":

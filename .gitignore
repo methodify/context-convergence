@@ -4,3 +4,6 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# Personal, machine-specific runbooks — never uploaded.
+local/
